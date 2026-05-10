@@ -64,7 +64,6 @@ async function directions(from, to) {
   const dist = leg.distance.value; // meters
   const edur = leg.duration.value; // seconds
 
-  // route_points: [lat, lon, lat, lon, ...]
   const route_points = [];
   for (const step of leg.steps) {
     route_points.push(step.start_location.lat, step.start_location.lng);
