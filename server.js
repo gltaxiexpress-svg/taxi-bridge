@@ -188,7 +188,10 @@ app.post("/vapi/book-taxi", async (req, res) => {
       }
     }
 
-    const callerPhone = args?.callerPhone;
+    const callerPhone =
+  args?.callerPhone ||
+  body?.call?.customer?.number ||
+  body?.message?.call?.customer?.number;
     const pickupAddress = args?.pickupAddress;
     const dropoffAddress = args?.dropoffAddress;
 
