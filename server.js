@@ -76,6 +76,13 @@ async function directions(from, to) {
 
 async function taxicallerAddJob({ callerPhone, from, to, route }) {
   const url = `${TAXICALLER_BASE_URL}/DispatchApp/dispatch`;
+  // ...
+  const dsessionValue = (TAXICALLER_DSESSION || "").trim();
+  // ... tu código sigue aquí
+}
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Listening on :${port}`));
 
   const payload = {
     method: "addjob",
