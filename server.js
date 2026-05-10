@@ -7,6 +7,17 @@ app.use(express.text({ type: "*/*", limit: "2mb" }));
 // Still accept normal JSON
 app.use(express.json({ limit: "2mb" }));
 
+// Log every incoming request (helps debug Vapi webhook 401s)
+app.use((req, res, next) => {
+  console.log(
+    `[REQ] ${new Date().toISOString()} ${req.method} ${req.path} ` +
+      `ua="${req.headers["user-agent"] || ""}" ` +
+      `cfip="${req.headers["cf-connecting-ip"] || ""}" ` +
+      `xff="${req.headers["x-forwarded-for"] || ""}"`
+  );
+  next();
+});
+
 const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // https://dn1001-rc.taxicaller.net
 const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY (not "dsession=")
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
@@ -116,145 +127,9 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
     }
   };
 
-  const dsessionValue = (TAXICALLER_DSESSION || "")
-    .trim()
-    .replace(/^dsession=/, "");
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/plain; charset=UTF-8",
-      Accept: "*/*",
-      Cookie: `dsession=${dsessionValue}`
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const data = await res.json();
-  if (!res.ok || data?.retcode !== 0) {
-    throw new Error(
-      `Taxicaller addjob failed: HTTP ${res.status} body=${JSON.stringify(data)}`
-    );
-  }
-
-  return data;
+  const dsessionValue = (TAXICALLER_DSESSION || "").trim();
+  // ... tu código sigue aquí
 }
-
-app.get("/health", (req, res) => res.json({ ok: true }));
-
-app.post("/vapi/book-taxi", async (req, res) => {
-  try {
-    requireEnv("TAXICALLER_BASE_URL");
-    requireEnv("TAXICALLER_DSESSION");
-    requireEnv("GOOGLE_MAPS_API_KEY");
-
-    // Parse body even if it came as text/plain
-    let body = req.body;
-    if (typeof body === "string") {
-      try {
-        body = JSON.parse(body);
-      } catch {
-        body = {};
-      }
-    }
-
-    // Try to find tool call(s) in many possible locations
-    const toolCallCandidateLists = [
-      body?.message?.toolCallList,
-      body?.message?.toolCalls,
-      body?.toolCallList,
-      body?.toolCalls,
-      body?.toolCall ? [body.toolCall] : null
-    ].filter(Boolean);
-
-    const toolCall = toolCallCandidateLists.flat()[0] || null;
-    const toolCallId = toolCall?.id || body?.toolCallId;
-
-    // Try to find args in many possible locations
-    let args =
-      toolCall?.function?.arguments ??
-      toolCall?.arguments ??
-      body?.message?.toolCallList?.[0]?.function?.arguments ??
-      body?.message?.toolCalls?.[0]?.function?.arguments ??
-      body?.args ??
-      body;
-
-    // arguments can be a JSON string
-    if (typeof args === "string") {
-      try {
-        args = JSON.parse(args);
-      } catch {
-        args = {};
-      }
-    }
-
-    const callerPhone =
-  args?.callerPhone ||
-  body?.call?.customer?.number ||
-  body?.message?.call?.customer?.number;
-    const pickupAddress = args?.pickupAddress;
-    const dropoffAddress = args?.dropoffAddress;
-
-    if (!callerPhone || !pickupAddress || !dropoffAddress) {
-      return res.json({
-        results: [
-          {
-            toolCallId,
-            result: {
-              error: true,
-              message:
-                "Missing required fields: callerPhone, pickupAddress, dropoffAddress",
-              receivedKeys: Object.keys(args || {}),
-              topLevelKeys: Object.keys(body || {})
-            }
-          }
-        ]
-      });
-    }
-
-    const from = await geocode(pickupAddress);
-    const to = await geocode(dropoffAddress);
-    const route = await directions(from, to);
-
-    const addjobResp = await taxicallerAddJob({ callerPhone, from, to, route });
-
-    const jobId = addjobResp?.data?.job?.id;
-    const etaMs = addjobResp?.data?.slot?.ewhen;
-    const price = addjobResp?.data?.fare?.price;
-
-    // CHANGED: force currency wording to "dollars"
-    const currency = "dollars";
-
-    const now = Date.now();
-    let etaMinutes = 1;
-    if (typeof etaMs === "number") {
-      etaMinutes = Math.max(1, Math.ceil((etaMs - now) / 60000));
-    }
-
-    return res.json({
-      results: [
-        {
-          toolCallId,
-          result: {
-            jobId,
-            etaMinutes,
-            price,
-            currency,
-            pickup: from.text,
-            dropoff: to.text
-          }
-        }
-      ]
-    });
-  } catch (e) {
-    return res.json({
-      results: [
-        {
-          result: { error: true, message: e.message }
-        }
-      ]
-    });
-  }
 });
 
 const port = process.env.PORT || 3000;
