@@ -75,6 +75,38 @@ async function directions(from, to) {
 }
 
 async function taxicallerAddJob({ callerPhone, from, to, route }) {
+  requireEnv("TAXICALLER_BASE_URL");
+  requireEnv("TAXICALLER_DSESSION");
+
+  const dsessionValue = (TAXICALLER_DSESSION || "").trim();
+  if (!dsessionValue) throw new Error("Empty TAXICALLER_DSESSION");
+
+  // TODO: pega aquí tu implementación real (payload + fetch a Taxicaller)
+  // Por ahora retornamos un stub para que el servidor arranque.
+  return { error: true, message: "taxicallerAddJob not implemented yet" };
+}
+
+// (Opcional) Health check rápido
+app.get("/", (req, res) => {
+  res.status(200).send("ok");
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Listening on :${port}`));
+  const dist = leg.distance.value; // meters
+  const edur = leg.duration.value; // seconds
+
+  // route_points: [lat, lon, lat, lon, ...]
+  const route_points = [];
+  for (const step of leg.steps) {
+    route_points.push(step.start_location.lat, step.start_location.lng);
+  }
+  route_points.push(leg.end_location.lat, leg.end_location.lng);
+
+  return { dist, edur, route_points };
+}
+
+async function taxicallerAddJob({ callerPhone, from, to, route }) {
   const url = `${TAXICALLER_BASE_URL}/DispatchApp/dispatch`;
   // ...
   const dsessionValue = (TAXICALLER_DSESSION || "").trim();
