@@ -87,8 +87,9 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
             ctids: [],
             cutids: [],
             vehicle_class: "",
-            booked_by: "VAPI",
-            last_edited_by: "VAPI"
+            // CHANGED: booked_by / last_edited_by
+            booked_by: "Dave Johnson",
+            last_edited_by: "Dave Johnson"
           },
           src: 1,
           vtype: "0",
@@ -115,14 +116,16 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
     }
   };
 
-     const dsessionValue = (TAXICALLER_DSESSION || "").trim().replace(/^dsession=/, "");
+  const dsessionValue = (TAXICALLER_DSESSION || "")
+    .trim()
+    .replace(/^dsession=/, "");
 
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "text/plain; charset=UTF-8",
-      "Accept": "*/*",
-      "Cookie": `dsession=${dsessionValue}`
+      Accept: "*/*",
+      Cookie: `dsession=${dsessionValue}`
     },
     body: JSON.stringify(payload)
   });
@@ -196,7 +199,8 @@ app.post("/vapi/book-taxi", async (req, res) => {
             toolCallId,
             result: {
               error: true,
-              message: "Missing required fields: callerPhone, pickupAddress, dropoffAddress",
+              message:
+                "Missing required fields: callerPhone, pickupAddress, dropoffAddress",
               receivedKeys: Object.keys(args || {}),
               topLevelKeys: Object.keys(body || {})
             }
@@ -214,7 +218,9 @@ app.post("/vapi/book-taxi", async (req, res) => {
     const jobId = addjobResp?.data?.job?.id;
     const etaMs = addjobResp?.data?.slot?.ewhen;
     const price = addjobResp?.data?.fare?.price;
-    const currency = addjobResp?.data?.fare?.currency;
+
+    // CHANGED: force currency wording to "dollars"
+    const currency = "dollars";
 
     const now = Date.now();
     let etaMinutes = 1;
