@@ -1,6 +1,10 @@
 import express from "express";
 
 const app = express();
+
+// Accept text/plain bodies (Vapi/Taxicaller often send JSON as text)
+app.use(express.text({ type: "*/*", limit: "2mb" }));
+// Still accept normal JSON
 app.use(express.json({ limit: "2mb" }));
 
 const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // https://dn1001-rc.taxicaller.net
@@ -51,14 +55,10 @@ async function directions(from, to) {
   const edur = leg.duration.value;
 
   // "route_points": array [lat, lon, lat, lon, ...]
-  // Tomamos overview_polyline y la convertimos a puntos.
-  // Para simplificar y evitar librerías, usaremos steps (más pesado pero funciona).
-  // Si quieres, luego lo optimizamos con polyline decode.
   const route_points = [];
   for (const step of leg.steps) {
     route_points.push(step.start_location.lat, step.start_location.lng);
   }
-  // agrega el final
   route_points.push(leg.end_location.lat, leg.end_location.lng);
 
   return { dist, edur, route_points };
@@ -67,7 +67,6 @@ async function directions(from, to) {
 async function taxicallerAddJob({ callerPhone, from, to, route }) {
   const url = `${TAXICALLER_BASE_URL}/DispatchApp/dispatch`;
 
-  // Payload basado en tu captura. Mantengo lo esencial.
   const payload = {
     method: "addjob",
     data: {
@@ -120,18 +119,18 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
   const res = await fetch(url, {
     method: "POST",
     headers: {
-      // En tu captura el browser manda text/plain aunque sea JSON
-      "content-type": "text/plain; charset=UTF-8",
-      "accept": "*/*",
-      "origin": TAXICALLER_BASE_URL,
-      "cookie": `dsession=${TAXICALLER_DSESSION}`
+      "Content-Type": "text/plain; charset=UTF-8",
+      "Accept": "*/*",
+      "Cookie": `dsession=${TAXICALLER_DSESSION}`
     },
     body: JSON.stringify(payload)
   });
 
   const data = await res.json();
   if (!res.ok || data?.retcode !== 0) {
-    throw new Error(`Taxicaller addjob failed: HTTP ${res.status} body=${JSON.stringify(data)}`);
+    throw new Error(
+      `Taxicaller addjob failed: HTTP ${res.status} body=${JSON.stringify(data)}`
+    );
   }
 
   return data;
@@ -145,7 +144,17 @@ app.post("/vapi/book-taxi", async (req, res) => {
     requireEnv("TAXICALLER_DSESSION");
     requireEnv("GOOGLE_MAPS_API_KEY");
 
-    const { callerPhone, pickupAddress, dropoffAddress } = req.body || {};
+    // Parse body even if it came as text/plain
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
+    }
+
+    const { callerPhone, pickupAddress, dropoffAddress } = body || {};
     if (!callerPhone || !pickupAddress || !dropoffAddress) {
       return res.status(400).json({
         error: "Missing required fields: callerPhone, pickupAddress, dropoffAddress"
@@ -163,7 +172,6 @@ app.post("/vapi/book-taxi", async (req, res) => {
     const price = addjobResp?.data?.fare?.price;
     const currency = addjobResp?.data?.fare?.currency;
 
-    // ETA en minutos (aprox). Si etaMs viene en el pasado o raro, fallback 1.
     const now = Date.now();
     let etaMinutes = 1;
     if (typeof etaMs === "number") {
