@@ -147,18 +147,60 @@ app.post("/vapi/book-taxi", async (req, res) => {
     // Parse body even if it came as text/plain
     let body = req.body;
     if (typeof body === "string") {
-      try {
-        body = JSON.parse(body);
-      } catch {
-        body = {};
-      }
+      try { body = JSON.parse(body); } catch { body = {}; }
     }
 
-    const { callerPhone, pickupAddress, dropoffAddress } = body || {};
+    // Extract tool call + args from Vapi payload
+    const toolCall =
+      body?.message?.toolCallList?.[0] ||
+      body?.toolCallList?.[0] ||
+      body?.toolCall ||
+      null;
+
+    const toolCallId = toolCall?.id || body?.toolCallId;
+
+    let args = toolCall?.function?.arguments ?? body?.args ?? body;
+
+    // arguments can be a JSON string
+    if (typeof args === "string") {
+      try { args = JSON.parse(args); } catch { args = {}; }
+    }
+
+    const { callerPhone, pickupAddress, dropoffAddress } = args || {};
+
     if (!callerPhone || !pickupAddress || !dropoffAddress) {
-      return res.status(400).json({
-        error: "Missing required fields: callerPhone, pickupAddress, dropoffAddress"
+      return res.json({
+        results: [
+          {
+            toolCallId,
+            result: "Missing required fields: callerPhone, pickupAddress, dropoffAddress"
+          }
+        ]
       });
+    }
+
+    const from = await geocode(pickupAddress);
+    const to = await geocode(dropoffAddress);
+    const route = await directions(from, to);
+
+    const addjobResp = await taxicallerAddJob({ callerPhone, from, to, route });
+
+    const jobId = addjobResp?.data?.job?.id;
+    const etaMs = addjobResp?.data?.slot?.ewhen; // epoch ms
+    const price = addjobResp?.data?.fare?.price;
+    const currency = addjobResp?.data?.fare?.currency;
+
+    const now = Date.now();
+    let etaMinutes = 1;
+    if (typeof etaMs === "number") {
+      etaMinutes = Math.max(1, Math.ceil((etaMs - now) / 60000));
+    }
+
+    return res.json({
+      results: [
+        {
+          toolCallId,
+          result;
     }
 
     const from = await geocode(pickupAddress);
