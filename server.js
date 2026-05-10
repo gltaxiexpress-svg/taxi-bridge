@@ -8,7 +8,7 @@ app.use(express.text({ type: "*/*", limit: "2mb" }));
 app.use(express.json({ limit: "2mb" }));
 
 const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // https://dn1001-rc.taxicaller.net
-const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // %7B%22id%22%3A...%7D  (VALUE ONLY)
+const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY (not "dsession=")
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
 function requireEnv(name) {
@@ -50,11 +50,10 @@ async function directions(from, to) {
 
   const leg = data.routes[0].legs[0];
 
-  // dist en metros, edur en segundos
-  const dist = leg.distance.value;
-  const edur = leg.duration.value;
+  const dist = leg.distance.value; // meters
+  const edur = leg.duration.value; // seconds
 
-  // "route_points": array [lat, lon, lat, lon, ...]
+  // route_points: [lat, lon, lat, lon, ...]
   const route_points = [];
   for (const step of leg.steps) {
     route_points.push(step.start_location.lat, step.start_location.lng);
@@ -145,56 +144,64 @@ app.post("/vapi/book-taxi", async (req, res) => {
     requireEnv("GOOGLE_MAPS_API_KEY");
 
     // Parse body even if it came as text/plain
-let body = req.body;
-if (typeof body === "string") {
-  try { body = JSON.parse(body); } catch { body = {}; }
-}
-
-// Try to find tool call(s) in many possible locations
-const toolCallCandidateLists = [
-  body?.message?.toolCallList,
-  body?.message?.toolCalls,
-  body?.toolCallList,
-  body?.toolCalls,
-  body?.toolCall ? [body.toolCall] : null
-].filter(Boolean);
-
-const toolCall = toolCallCandidateLists.flat()[0] || null;
-
-// Try to find args in many possible locations
-let args =
-  toolCall?.function?.arguments ??
-  toolCall?.arguments ??
-  body?.message?.toolCallList?.[0]?.function?.arguments ??
-  body?.message?.toolCalls?.[0]?.function?.arguments ??
-  body?.args ??
-  body;
-
-if (typeof args === "string") {
-  try { args = JSON.parse(args); } catch { args = {}; }
-}
-
-const callerPhone = args?.callerPhone;
-const pickupAddress = args?.pickupAddress;
-const dropoffAddress = args?.dropoffAddress;
-
-// If still missing, return debug so we can see payload shape from Vapi
-if (!callerPhone || !pickupAddress || !dropoffAddress) {
-  return res.json({
-    results: [
-      {
-        toolCallId: toolCall?.id,
-        result: {
-          error: true,
-          message: "Missing required fields",
-          receivedKeys: Object.keys(args || {}),
-          topLevelKeys: Object.keys(body || {}),
-          sampleBody: body
-        }
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
       }
-    ]
-  });
-}
+    }
+
+    // Try to find tool call(s) in many possible locations
+    const toolCallCandidateLists = [
+      body?.message?.toolCallList,
+      body?.message?.toolCalls,
+      body?.toolCallList,
+      body?.toolCalls,
+      body?.toolCall ? [body.toolCall] : null
+    ].filter(Boolean);
+
+    const toolCall = toolCallCandidateLists.flat()[0] || null;
+    const toolCallId = toolCall?.id || body?.toolCallId;
+
+    // Try to find args in many possible locations
+    let args =
+      toolCall?.function?.arguments ??
+      toolCall?.arguments ??
+      body?.message?.toolCallList?.[0]?.function?.arguments ??
+      body?.message?.toolCalls?.[0]?.function?.arguments ??
+      body?.args ??
+      body;
+
+    // arguments can be a JSON string
+    if (typeof args === "string") {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        args = {};
+      }
+    }
+
+    const callerPhone = args?.callerPhone;
+    const pickupAddress = args?.pickupAddress;
+    const dropoffAddress = args?.dropoffAddress;
+
+    if (!callerPhone || !pickupAddress || !dropoffAddress) {
+      return res.json({
+        results: [
+          {
+            toolCallId,
+            result: {
+              error: true,
+              message: "Missing required fields: callerPhone, pickupAddress, dropoffAddress",
+              receivedKeys: Object.keys(args || {}),
+              topLevelKeys: Object.keys(body || {})
+            }
+          }
+        ]
+      });
+    }
 
     const from = await geocode(pickupAddress);
     const to = await geocode(dropoffAddress);
@@ -203,7 +210,7 @@ if (!callerPhone || !pickupAddress || !dropoffAddress) {
     const addjobResp = await taxicallerAddJob({ callerPhone, from, to, route });
 
     const jobId = addjobResp?.data?.job?.id;
-    const etaMs = addjobResp?.data?.slot?.ewhen; // epoch ms
+    const etaMs = addjobResp?.data?.slot?.ewhen;
     const price = addjobResp?.data?.fare?.price;
     const currency = addjobResp?.data?.fare?.currency;
 
@@ -217,36 +224,25 @@ if (!callerPhone || !pickupAddress || !dropoffAddress) {
       results: [
         {
           toolCallId,
-          result;
-    }
-
-    const from = await geocode(pickupAddress);
-    const to = await geocode(dropoffAddress);
-    const route = await directions(from, to);
-
-    const addjobResp = await taxicallerAddJob({ callerPhone, from, to, route });
-
-    const jobId = addjobResp?.data?.job?.id;
-    const etaMs = addjobResp?.data?.slot?.ewhen; // epoch ms
-    const price = addjobResp?.data?.fare?.price;
-    const currency = addjobResp?.data?.fare?.currency;
-
-    const now = Date.now();
-    let etaMinutes = 1;
-    if (typeof etaMs === "number") {
-      etaMinutes = Math.max(1, Math.ceil((etaMs - now) / 60000));
-    }
-
-    return res.json({
-      jobId,
-      etaMinutes,
-      price,
-      currency,
-      pickup: from.text,
-      dropoff: to.text
+          result: {
+            jobId,
+            etaMinutes,
+            price,
+            currency,
+            pickup: from.text,
+            dropoff: to.text
+          }
+        }
+      ]
     });
   } catch (e) {
-    return res.status(500).json({ error: true, message: e.message });
+    return res.json({
+      results: [
+        {
+          result: { error: true, message: e.message }
+        }
+      ]
+    });
   }
 });
 
