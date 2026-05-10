@@ -145,39 +145,56 @@ app.post("/vapi/book-taxi", async (req, res) => {
     requireEnv("GOOGLE_MAPS_API_KEY");
 
     // Parse body even if it came as text/plain
-    let body = req.body;
-    if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch { body = {}; }
-    }
+let body = req.body;
+if (typeof body === "string") {
+  try { body = JSON.parse(body); } catch { body = {}; }
+}
 
-    // Extract tool call + args from Vapi payload
-    const toolCall =
-      body?.message?.toolCallList?.[0] ||
-      body?.toolCallList?.[0] ||
-      body?.toolCall ||
-      null;
+// Try to find tool call(s) in many possible locations
+const toolCallCandidateLists = [
+  body?.message?.toolCallList,
+  body?.message?.toolCalls,
+  body?.toolCallList,
+  body?.toolCalls,
+  body?.toolCall ? [body.toolCall] : null
+].filter(Boolean);
 
-    const toolCallId = toolCall?.id || body?.toolCallId;
+const toolCall = toolCallCandidateLists.flat()[0] || null;
 
-    let args = toolCall?.function?.arguments ?? body?.args ?? body;
+// Try to find args in many possible locations
+let args =
+  toolCall?.function?.arguments ??
+  toolCall?.arguments ??
+  body?.message?.toolCallList?.[0]?.function?.arguments ??
+  body?.message?.toolCalls?.[0]?.function?.arguments ??
+  body?.args ??
+  body;
 
-    // arguments can be a JSON string
-    if (typeof args === "string") {
-      try { args = JSON.parse(args); } catch { args = {}; }
-    }
+if (typeof args === "string") {
+  try { args = JSON.parse(args); } catch { args = {}; }
+}
 
-    const { callerPhone, pickupAddress, dropoffAddress } = args || {};
+const callerPhone = args?.callerPhone;
+const pickupAddress = args?.pickupAddress;
+const dropoffAddress = args?.dropoffAddress;
 
-    if (!callerPhone || !pickupAddress || !dropoffAddress) {
-      return res.json({
-        results: [
-          {
-            toolCallId,
-            result: "Missing required fields: callerPhone, pickupAddress, dropoffAddress"
-          }
-        ]
-      });
-    }
+// If still missing, return debug so we can see payload shape from Vapi
+if (!callerPhone || !pickupAddress || !dropoffAddress) {
+  return res.json({
+    results: [
+      {
+        toolCallId: toolCall?.id,
+        result: {
+          error: true,
+          message: "Missing required fields",
+          receivedKeys: Object.keys(args || {}),
+          topLevelKeys: Object.keys(body || {}),
+          sampleBody: body
+        }
+      }
+    ]
+  });
+}
 
     const from = await geocode(pickupAddress);
     const to = await geocode(dropoffAddress);
