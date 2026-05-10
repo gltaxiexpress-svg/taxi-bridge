@@ -115,12 +115,14 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
     }
   };
 
+     const dsessionValue = (TAXICALLER_DSESSION || "").trim().replace(/^dsession=/, "");
+
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "text/plain; charset=UTF-8",
       "Accept": "*/*",
-      "Cookie": `dsession=${TAXICALLER_DSESSION}`
+      "Cookie": `dsession=${dsessionValue}`
     },
     body: JSON.stringify(payload)
   });
