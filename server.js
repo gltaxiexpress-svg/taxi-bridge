@@ -190,6 +190,10 @@ app.post("/create-booking", async (req, res) => {
       body = s ? JSON.parse(s) : {};
     }
 
+    // ✅ ADDED: log where caller id might be
+    console.log("VAPI customer.number:", body?.customer?.number);
+    console.log("VAPI call.customer.number:", body?.call?.customer?.number);
+
     // 2) Acepta payload normal o payload Vapi (arguments)
     const vapiArgsRaw = body?.message?.toolCallList?.[0]?.function?.arguments;
     let vapiArgs = {};
