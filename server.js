@@ -149,6 +149,10 @@ app.get("/", (req, res) => res.status(200).send("ok"));
 
 // Vapi tool endpoint (simple JSON)
 app.post("/vapi/book-taxi", async (req, res) => {
+  // helper para responder siempre en formato tool-results
+  const respond = (toolCallId, result) =>
+    res.status(200).json({ results: [{ toolCallId, result }] });
+
   try {
     requireEnv("TAXICALLER_BASE_URL");
     requireEnv("TAXICALLER_DSESSION");
@@ -161,33 +165,33 @@ app.post("/vapi/book-taxi", async (req, res) => {
       body = s ? JSON.parse(s) : {};
     }
 
-    const msg = body?.message;
-    const toolCall = msg?.toolCallList?.[0];
+    const toolCall = body?.message?.toolCallList?.[0];
     const toolCallId = toolCall?.id;
 
     if (!toolCallId) {
-      return res.status(400).json({ error: "Missing toolCallId/toolCallList" });
+      return res.status(400).json({ error: "Missing message.toolCallList[0].id" });
     }
 
-    // Vapi may send arguments as stringified JSON or as object
+    // Arguments might be an object or a JSON string
     let args = toolCall?.function?.arguments ?? {};
     if (typeof args === "string") {
       const s = args.trim();
       args = s ? JSON.parse(s) : {};
     }
 
-    const callerPhone = args.callerPhone || args.phone || "";
-    const pickupAddress = args.pickupAddress || args.fromAddress || args.from || "";
-    const dropoffAddress = args.dropoffAddress || args.toAddress || args.to || "";
+    const pickupAddress = args.pickupAddress || "";
+    const dropoffAddress = args.dropoffAddress || "";
+
+    // Pull caller ID from the call payload (don’t trust the model)
+    const callerPhone =
+      body?.message?.call?.customer?.number ||
+      args.callerPhone ||
+      "";
 
     if (!pickupAddress || !dropoffAddress) {
-      return res.status(200).json({
-        results: [
-          {
-            toolCallId,
-            result: { error: true, message: "Missing pickupAddress or dropoffAddress" }
-          }
-        ]
+      return respond(toolCallId, {
+        error: true,
+        message: "Missing pickupAddress or dropoffAddress"
       });
     }
 
@@ -197,43 +201,31 @@ app.post("/vapi/book-taxi", async (req, res) => {
 
     const tc = await taxicallerAddJob({ callerPhone, from, to, route });
 
-    // Try to normalize success fields for the assistant prompt
+    // Normalize jobId if present
     const jobId =
-      tc?.data?.job?.id ||
-      tc?.jobId ||
-      tc?.job_id ||
-      tc?.id ||
+      tc?.data?.job?.id ??
+      tc?.jobId ??
+      tc?.job_id ??
+      tc?.id ??
       null;
 
-    return res.status(200).json({
-      results: [
-        {
-          toolCallId,
-          result: {
-            error: false,
-            jobId,
-            taxicaller: tc
-          }
-        }
-      ]
+    return respond(toolCallId, {
+      error: false,
+      jobId,
+      taxicaller: tc
     });
   } catch (err) {
     console.error("book-taxi error:", err);
 
-    // If we can, respond in tool-results format to avoid Vapi treating it as webhook failure
+    // Try to still respond in tool-results format if we can extract toolCallId
     try {
       let body = req.body;
       if (typeof body === "string") body = JSON.parse(body);
       const toolCallId = body?.message?.toolCallList?.[0]?.id;
-
       if (toolCallId) {
-        return res.status(200).json({
-          results: [
-            {
-              toolCallId,
-              result: { error: true, message: String(err?.message || err) }
-            }
-          ]
+        return respond(toolCallId, {
+          error: true,
+          message: String(err?.message || err)
         });
       }
     } catch {}
