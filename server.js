@@ -190,7 +190,7 @@ app.post("/create-booking", async (req, res) => {
       body = s ? JSON.parse(s) : {};
     }
 
-    // ✅ ADDED: log where caller id might be
+    // Log where caller id might be (debug)
     console.log("VAPI customer.number:", body?.customer?.number);
     console.log("VAPI call.customer.number:", body?.call?.customer?.number);
 
@@ -216,8 +216,27 @@ app.post("/create-booking", async (req, res) => {
       notes
     });
 
-    if (!callerPhone || !pickupAddress || !dropoffAddress) {
-      const out = { success: false, error: "Missing customer_phone, pickup_address, or destination_address" };
+    // ✅ UPDATED VALIDATION:
+    // - pickup + destination required
+    // - phone required only if it is valid (otherwise ASK_PHONE_NUMBER)
+    const phoneRaw = String(callerPhone || "").trim().toLowerCase();
+    const invalidPhones = new Set([
+      "",
+      "e.164",
+      "unknown",
+      "private",
+      "anonymous",
+      "blocked",
+      "unavailable"
+    ]);
+
+    if (!pickupAddress || !dropoffAddress) {
+      const out = { success: false, error: "Missing pickup_address or destination_address" };
+      return toolCallId ? sendVapi(toolCallId, out, 400) : sendSimple(out, 400);
+    }
+
+    if (invalidPhones.has(phoneRaw)) {
+      const out = { success: false, error: "ASK_PHONE_NUMBER" };
       return toolCallId ? sendVapi(toolCallId, out, 400) : sendSimple(out, 400);
     }
 
@@ -242,10 +261,7 @@ app.post("/create-booking", async (req, res) => {
     const tc = await taxicallerAddJob({ callerPhone, from, to, route });
     console.log("taxicaller response received");
 
-    // ✅ NEW RULES:
-    // - eta always present (fallback "Soon")
-    // - success true ONLY if booking_id exists
-    // - if booking_id missing: success false + specific error
+    // Booking ID & ETA rules
     const booking_id =
       tc?.data?.job?.id ??
       tc?.jobId ??
