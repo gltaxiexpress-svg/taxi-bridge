@@ -1,4 +1,4 @@
-  import express from "express";
+import express from "express";
 
 console.log("BOOT MARKER:", "routes-check-enabled", new Date().toISOString());
 
@@ -153,6 +153,10 @@ app.get("/routes-check", (req, res) => {
 app.get("/", (req, res) => res.status(200).send("ok"));
 
 app.post("/create-booking", async (req, res) => {
+  // 🔎 TRACE LOGS (para ver exactamente dónde se queda)
+  console.log("HIT /create-booking", new Date().toISOString());
+  console.log("RAW BODY TYPE:", typeof req.body);
+
   const sendSimple = (payload, status = 200) => res.status(status).json(payload);
   const sendVapi = (toolCallId, result, status = 200) =>
     res.status(status).json({ results: [{ toolCallId, result }] });
@@ -199,17 +203,40 @@ app.post("/create-booking", async (req, res) => {
     const passengers = Number(body.passengers ?? vapiArgs.passengers ?? 1);
     const notes = String(body.notes ?? vapiArgs.notes ?? "");
 
+    console.log("create-booking args:", {
+      customer_name,
+      callerPhone,
+      pickupAddress,
+      dropoffAddress,
+      passengers,
+      notes
+    });
+
     if (!callerPhone || !pickupAddress || !dropoffAddress) {
       const out = { success: false, error: "Missing customer_phone, pickup_address, or destination_address" };
       return toolCallId ? sendVapi(toolCallId, out, 400) : sendSimple(out, 400);
     }
 
     // 3) Reutiliza tu lógica existente
+    console.log("geocoding pickup...");
     const from = await geocode(pickupAddress);
-    const to = await geocode(dropoffAddress);
-    const route = await directions(from, to);
+    console.log("pickup geocoded:", from);
 
+    console.log("geocoding dropoff...");
+    const to = await geocode(dropoffAddress);
+    console.log("dropoff geocoded:", to);
+
+    console.log("getting directions...");
+    const route = await directions(from, to);
+    console.log("directions ok:", {
+      dist: route.dist,
+      edur: route.edur,
+      points: route.route_points?.length
+    });
+
+    console.log("sending to taxicaller...");
     const tc = await taxicallerAddJob({ callerPhone, from, to, route });
+    console.log("taxicaller response received");
 
     const booking_id =
       tc?.data?.job?.id ?? tc?.jobId ?? tc?.job_id ?? tc?.id ?? null;
@@ -219,18 +246,20 @@ app.post("/create-booking", async (req, res) => {
     const out = {
       success: true,
       eta: eta || "Soon",
-      booking_id: booking_id ? String(booking_id) : null,
+      booking_id: booking_id ? String(booking_id) : null
       // opcional para debugging:
       // taxicaller: tc
     };
 
     return toolCallId ? sendVapi(toolCallId, out) : sendSimple(out);
   } catch (err) {
+    console.log("ERROR /create-booking:", err);
     const out = { success: false, error: String(err?.message || err) };
     const toolCallId = getToolCallIdIfAny(req.body);
     return toolCallId ? sendVapi(toolCallId, out, 500) : sendSimple(out, 500);
   }
 });
+
 // Vapi tool endpoint (simple JSON)
 app.post("/vapi/book-taxi", async (req, res) => {
   const respond = (toolCallId, result) =>
