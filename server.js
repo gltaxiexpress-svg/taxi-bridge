@@ -160,9 +160,9 @@ app.post("/vapi/book-taxi", async (req, res) => {
     // 1) Body parse seguro
     let body = req.body;
     if (typeof body === "string") {
-      const s = body.trim();
-      body = s ? JSON.parse(s) : {};
-    }
+  const s = body.trim();
+  body = s ? JSON.parse(s) : {};
+}
 
     // 2) Leer tool call
     const toolCall = body?.message?.toolCallList?.[0];
