@@ -145,6 +145,9 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
 }
 
 // Health check
+app.get("/routes-check", (req, res) => {
+  res.json({ ok: true, hasCreateBooking: true });
+});
 app.get("/", (req, res) => res.status(200).send("ok"));
 
 app.post("/create-booking", async (req, res) => {
