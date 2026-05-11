@@ -1,5 +1,7 @@
   import express from "express";
 
+console.log("BOOT MARKER:", "routes-check-enabled", new Date().toISOString());
+
 const app = express();
 
 // Accept text/plain bodies (Vapi/Taxicaller often send JSON as text)
