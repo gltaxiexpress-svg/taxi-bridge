@@ -216,14 +216,18 @@ app.post("/vapi/book-taxi", async (req, res) => {
     console.error("book-taxi error:", err);
 
     // intenta responder en formato tool-results si podemos extraer toolCallId
-    try {
-  let body = req.body;
-  if (typeof body === "string") {
-    const s = body.trim();
-    body = s ? JSON.parse(s) : {};
+       try {
+      let body = req.body;
+      if (typeof body === "string") {
+        const s = body.trim();
+        body = s ? JSON.parse(s) : {};
+      }
+      const toolCallId = body?.message?.toolCallList?.[0]?.id;
+      if (toolCallId) {
+        return respond(toolCallId, { error: true, message: String(err?.message || err) });
+      }
+    } catch {}
+
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
-  const toolCallId = body?.message?.toolCallList?.[0]?.id;
-  if (toolCallId) {
-    return respond(toolCallId, { error: true, message: String(err?.message || err) });
-  }
-} catch {}
+});
