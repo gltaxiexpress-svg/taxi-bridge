@@ -149,7 +149,6 @@ app.get("/", (req, res) => res.status(200).send("ok"));
 
 // Vapi tool endpoint (simple JSON)
 app.post("/vapi/book-taxi", async (req, res) => {
-  // helper para responder siempre en formato tool-results
   const respond = (toolCallId, result) =>
     res.status(200).json({ results: [{ toolCallId, result }] });
 
@@ -158,21 +157,21 @@ app.post("/vapi/book-taxi", async (req, res) => {
     requireEnv("TAXICALLER_DSESSION");
     requireEnv("GOOGLE_MAPS_API_KEY");
 
-    // Parse body even if it came as text/plain
+    // 1) Body parse seguro
     let body = req.body;
     if (typeof body === "string") {
       const s = body.trim();
       body = s ? JSON.parse(s) : {};
     }
 
+    // 2) Leer tool call
     const toolCall = body?.message?.toolCallList?.[0];
     const toolCallId = toolCall?.id;
-
     if (!toolCallId) {
       return res.status(400).json({ error: "Missing message.toolCallList[0].id" });
     }
 
-    // Arguments might be an object or a JSON string
+    // 3) Args parse seguro (string u objeto)
     let args = toolCall?.function?.arguments ?? {};
     if (typeof args === "string") {
       const s = args.trim();
@@ -182,7 +181,7 @@ app.post("/vapi/book-taxi", async (req, res) => {
     const pickupAddress = args.pickupAddress || "";
     const dropoffAddress = args.dropoffAddress || "";
 
-    // Pull caller ID from the call payload (don’t trust the model)
+    // caller ID real desde el evento
     const callerPhone =
       body?.message?.call?.customer?.number ||
       args.callerPhone ||
@@ -201,7 +200,6 @@ app.post("/vapi/book-taxi", async (req, res) => {
 
     const tc = await taxicallerAddJob({ callerPhone, from, to, route });
 
-    // Normalize jobId if present
     const jobId =
       tc?.data?.job?.id ??
       tc?.jobId ??
@@ -217,19 +215,16 @@ app.post("/vapi/book-taxi", async (req, res) => {
   } catch (err) {
     console.error("book-taxi error:", err);
 
-    // Try to still respond in tool-results format if we can extract toolCallId
+    // intenta responder en formato tool-results si podemos extraer toolCallId
     try {
       let body = req.body;
       if (typeof body === "string") body = JSON.parse(body);
       const toolCallId = body?.message?.toolCallList?.[0]?.id;
       if (toolCallId) {
-        return respond(toolCallId, {
-          error: true,
-          message: String(err?.message || err)
-        });
+        return respond(toolCallId, { error: true, message: String(err?.message || err) });
       }
     } catch {}
 
-    return res.status(500).json({ error: String(err?.message || err) });
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
