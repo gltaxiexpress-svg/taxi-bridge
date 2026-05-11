@@ -1,43 +1,18 @@
-  const dsessionValue = (TAXICALLER_DSESSION || "").trim();
-  if (!dsessionValue) throw new Error("Empty TAXICALLER_DSESSION");
+  import express from "express";
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      // Taxicaller auth via session cookie
-      cookie: `dsession=${dsessionValue}`
-    },
-    body: JSON.stringify(payload)
-  });
+const app = express();
 
-  const text = await res.text();
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = { raw: text };
-  }
+// Accept text/plain bodies (Vapi/Taxicaller often send JSON as text)
+app.use(express.text({ type: "*/*", limit: "2mb" }));
+app.use(express.json({ limit: "2mb" }));
 
-  if (!res.ok) {
-    throw new Error(`Taxicaller error ${res.status}: ${text}`);
-  }
+const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // https://dn1001-rc.taxicaller.net
+const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY (not "dsession=")
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
-  return data;
+function requireEnv(name) {
+  if (!process.env[name]) throw new Error(`Missing env var: ${name}`);
 }
-
-// Health check
-app.get("/", (req, res) => res.status(200).send("ok"));
-
-// Vapi tool endpoint (simple)
-app.post("/vapi/book-taxi", async (req, res) => {
-  try {
-    requireEnv("TAXICALLER_BASE_URL");
-    requireEnv("TAXICALLER_DSESSION");
-    requireEnv("GOOGLE_MAPS_API_KEY");
-
-    const body =
-      typeof req.body === "string" &&
 
 async function geocode(address) {
   const url =
@@ -51,7 +26,7 @@ async function geocode(address) {
     throw new Error(`Geocode failed for "${address}": ${data.status}`);
   }
 
-    const loc = data.results[0].geometry.location;
+  const loc = data.results[0].geometry.location;
   const formatted = data.results[0].formatted_address;
   return { lat: loc.lat, lon: loc.lng, text: formatted };
 }
@@ -86,21 +61,10 @@ async function directions(from, to) {
   return { dist, edur, route_points };
 }
 
-  const leg = data.routes[0].legs[0];
-
-  const dist = leg.distance.value; // meters
-  const edur = leg.duration.value; // seconds
-
-  const route_points = [];
-  for (const step of leg.steps) {
-    route_points.push(step.start_location.lat, step.start_location.lng);
-  }
-  route_points.push(leg.end_location.lat, leg.end_location.lng);
-
-  return { dist, edur, route_points };
-}
-
 async function taxicallerAddJob({ callerPhone, from, to, route }) {
+  requireEnv("TAXICALLER_BASE_URL");
+  requireEnv("TAXICALLER_DSESSION");
+
   const url = `${TAXICALLER_BASE_URL}/DispatchApp/dispatch`;
 
   const payload = {
@@ -165,6 +129,7 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
   });
 
   const text = await res.text();
+
   let data;
   try {
     data = JSON.parse(text);
@@ -178,3 +143,41 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
 
   return data;
 }
+
+// Health check
+app.get("/", (req, res) => res.status(200).send("ok"));
+
+// Vapi tool endpoint (simple JSON)
+app.post("/vapi/book-taxi", async (req, res) => {
+  try {
+    requireEnv("GOOGLE_MAPS_API_KEY");
+
+    const body =
+      typeof req.body === "string" && req.body.length ? JSON.parse(req.body) : req.body;
+
+    const callerPhone = body?.phone || body?.callerPhone || "";
+    const fromAddress = body?.fromAddress || body?.from || "";
+    const toAddress = body?.toAddress || body?.to || "";
+
+    if (!callerPhone || !fromAddress || !toAddress) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required fields: phone/callerPhone, fromAddress/from, toAddress/to"
+      });
+    }
+
+    const from = await geocode(fromAddress);
+    const to = await geocode(toAddress);
+    const route = await directions(from, to);
+
+    const result = await taxicallerAddJob({ callerPhone, from, to, route });
+
+    return res.json({ ok: true, result });
+  } catch (err) {
+    console.error("book-taxi error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Listening on :${port}`));
