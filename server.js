@@ -3,8 +3,8 @@
 const app = express();
 
 // Accept text/plain bodies (Vapi/Taxicaller often send JSON as text)
-app.use(express.text({ type: "*/*", limit: "2mb" }));
 app.use(express.json({ limit: "2mb" }));
+app.use(express.text({ type: "text/*", limit: "2mb" }));
 
 const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // https://dn1001-rc.taxicaller.net
 const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY (not "dsession=")
