@@ -38,7 +38,7 @@ async function geocode(address) {
     throw new Error(`Geocode failed for "${address}": ${data.status}`);
   }
 
-  const loc = data.results[0].geometry.location;
+    const loc = data.results[0].geometry.location;
   const formatted = data.results[0].formatted_address;
   return { lat: loc.lat, lon: loc.lng, text: formatted };
 }
