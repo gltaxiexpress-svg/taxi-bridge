@@ -1,30 +1,43 @@
-import express from "express";
+  const dsessionValue = (TAXICALLER_DSESSION || "").trim();
+  if (!dsessionValue) throw new Error("Empty TAXICALLER_DSESSION");
 
-const app = express();
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      // Taxicaller auth via session cookie
+      cookie: `dsession=${dsessionValue}`
+    },
+    body: JSON.stringify(payload)
+  });
 
-// Accept text/plain bodies (Vapi/Taxicaller often send JSON as text)
-app.use(express.text({ type: "*/*", limit: "2mb" }));
-// Still accept normal JSON
-app.use(express.json({ limit: "2mb" }));
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
 
-// Log every incoming request (helps debug Vapi webhook 401s)
-app.use((req, res, next) => {
-  console.log(
-    `[REQ] ${new Date().toISOString()} ${req.method} ${req.path} ` +
-      `ua="${req.headers["user-agent"] || ""}" ` +
-      `cfip="${req.headers["cf-connecting-ip"] || ""}" ` +
-      `xff="${req.headers["x-forwarded-for"] || ""}"`
-  );
-  next();
-});
+  if (!res.ok) {
+    throw new Error(`Taxicaller error ${res.status}: ${text}`);
+  }
 
-const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // https://dn1001-rc.taxicaller.net
-const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY (not "dsession=")
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
-
-function requireEnv(name) {
-  if (!process.env[name]) throw new Error(`Missing env var: ${name}`);
+  return data;
 }
+
+// Health check
+app.get("/", (req, res) => res.status(200).send("ok"));
+
+// Vapi tool endpoint (simple)
+app.post("/vapi/book-taxi", async (req, res) => {
+  try {
+    requireEnv("TAXICALLER_BASE_URL");
+    requireEnv("TAXICALLER_DSESSION");
+    requireEnv("GOOGLE_MAPS_API_KEY");
+
+    const body =
+      typeof req.body === "string" &&
 
 async function geocode(address) {
   const url =
