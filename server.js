@@ -150,34 +150,94 @@ app.get("/", (req, res) => res.status(200).send("ok"));
 // Vapi tool endpoint (simple JSON)
 app.post("/vapi/book-taxi", async (req, res) => {
   try {
+    requireEnv("TAXICALLER_BASE_URL");
+    requireEnv("TAXICALLER_DSESSION");
     requireEnv("GOOGLE_MAPS_API_KEY");
 
-    const body =
-      typeof req.body === "string" && req.body.length ? JSON.parse(req.body) : req.body;
+    // Parse body even if it came as text/plain
+    let body = req.body;
+    if (typeof body === "string") {
+      const s = body.trim();
+      body = s ? JSON.parse(s) : {};
+    }
 
-    const callerPhone = body?.phone || body?.callerPhone || "";
-    const fromAddress = body?.fromAddress || body?.from || "";
-    const toAddress = body?.toAddress || body?.to || "";
+    const msg = body?.message;
+    const toolCall = msg?.toolCallList?.[0];
+    const toolCallId = toolCall?.id;
 
-    if (!callerPhone || !fromAddress || !toAddress) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing required fields: phone/callerPhone, fromAddress/from, toAddress/to"
+    if (!toolCallId) {
+      return res.status(400).json({ error: "Missing toolCallId/toolCallList" });
+    }
+
+    // Vapi may send arguments as stringified JSON or as object
+    let args = toolCall?.function?.arguments ?? {};
+    if (typeof args === "string") {
+      const s = args.trim();
+      args = s ? JSON.parse(s) : {};
+    }
+
+    const callerPhone = args.callerPhone || args.phone || "";
+    const pickupAddress = args.pickupAddress || args.fromAddress || args.from || "";
+    const dropoffAddress = args.dropoffAddress || args.toAddress || args.to || "";
+
+    if (!pickupAddress || !dropoffAddress) {
+      return res.status(200).json({
+        results: [
+          {
+            toolCallId,
+            result: { error: true, message: "Missing pickupAddress or dropoffAddress" }
+          }
+        ]
       });
     }
 
-    const from = await geocode(fromAddress);
-    const to = await geocode(toAddress);
+    const from = await geocode(pickupAddress);
+    const to = await geocode(dropoffAddress);
     const route = await directions(from, to);
 
-    const result = await taxicallerAddJob({ callerPhone, from, to, route });
+    const tc = await taxicallerAddJob({ callerPhone, from, to, route });
 
-    return res.json({ ok: true, result });
+    // Try to normalize success fields for the assistant prompt
+    const jobId =
+      tc?.data?.job?.id ||
+      tc?.jobId ||
+      tc?.job_id ||
+      tc?.id ||
+      null;
+
+    return res.status(200).json({
+      results: [
+        {
+          toolCallId,
+          result: {
+            error: false,
+            jobId,
+            taxicaller: tc
+          }
+        }
+      ]
+    });
   } catch (err) {
     console.error("book-taxi error:", err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+
+    // If we can, respond in tool-results format to avoid Vapi treating it as webhook failure
+    try {
+      let body = req.body;
+      if (typeof body === "string") body = JSON.parse(body);
+      const toolCallId = body?.message?.toolCallList?.[0]?.id;
+
+      if (toolCallId) {
+        return res.status(200).json({
+          results: [
+            {
+              toolCallId,
+              result: { error: true, message: String(err?.message || err) }
+            }
+          ]
+        });
+      }
+    } catch {}
+
+    return res.status(500).json({ error: String(err?.message || err) });
   }
 });
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Listening on :${port}`));
