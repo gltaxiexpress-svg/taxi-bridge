@@ -160,74 +160,17 @@ app.post("/vapi/book-taxi", async (req, res) => {
     // 1) Body parse seguro
     let body = req.body;
     if (typeof body === "string") {
-  const s = body.trim();
-  body = s ? JSON.parse(s) : {};
-}
-
-    // 2) Leer tool call
-    const toolCall = body?.message?.toolCallList?.[0];
-    const toolCallId = toolCall?.id;
-    if (!toolCallId) {
-      return res.status(400).json({ error: "Missing message.toolCallList[0].id" });
+      const s = body.trim();
+      body = s ? JSON.parse(s) : {};
     }
 
-    // 3) Args parse seguro (string u objeto)
-    let args = toolCall?.function?.arguments ?? {};
-    if (typeof args === "string") {
-      const s = args.trim();
-      args = s ? JSON.parse(s) : {};
-    }
-
-    const pickupAddress = args.pickupAddress || "";
-    const dropoffAddress = args.dropoffAddress || "";
-
-    // caller ID real desde el evento
-    const callerPhone =
-      body?.message?.call?.customer?.number ||
-      args.callerPhone ||
-      "";
-
-    if (!pickupAddress || !dropoffAddress) {
-      return respond(toolCallId, {
-        error: true,
-        message: "Missing pickupAddress or dropoffAddress"
-      });
-    }
-
-    const from = await geocode(pickupAddress);
-    const to = await geocode(dropoffAddress);
-    const route = await directions(from, to);
-
-    const tc = await taxicallerAddJob({ callerPhone, from, to, route });
-
-    const jobId =
-      tc?.data?.job?.id ??
-      tc?.jobId ??
-      tc?.job_id ??
-      tc?.id ??
-      null;
-
-    return respond(toolCallId, {
-      error: false,
-      jobId,
-      taxicaller: tc
-    });
+    // ... tu código igual ...
   } catch (err) {
-    console.error("book-taxi error:", err);
-
-    // intenta responder en formato tool-results si podemos extraer toolCallId
-       try {
-      let body = req.body;
-      if (typeof body === "string") {
-        const s = body.trim();
-        body = s ? JSON.parse(s) : {};
-      }
-      const toolCallId = body?.message?.toolCallList?.[0]?.id;
-      if (toolCallId) {
-        return respond(toolCallId, { error: true, message: String(err?.message || err) });
-      }
-    } catch {}
-
-      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    // ... tu catch igual ...
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+
+// ✅ ESTO VA AL FINAL DEL ARCHIVO (fuera de cualquier endpoint)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
