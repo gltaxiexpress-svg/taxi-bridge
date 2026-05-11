@@ -73,6 +73,20 @@ async function directions(from, to) {
   return { dist, edur, route_points };
 }
 
+  const leg = data.routes[0].legs[0];
+
+  const dist = leg.distance.value; // meters
+  const edur = leg.duration.value; // seconds
+
+  const route_points = [];
+  for (const step of leg.steps) {
+    route_points.push(step.start_location.lat, step.start_location.lng);
+  }
+  route_points.push(leg.end_location.lat, leg.end_location.lng);
+
+  return { dist, edur, route_points };
+}
+
 async function taxicallerAddJob({ callerPhone, from, to, route }) {
   requireEnv("TAXICALLER_BASE_URL");
   requireEnv("TAXICALLER_DSESSION");
