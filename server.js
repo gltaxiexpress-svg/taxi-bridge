@@ -238,15 +238,33 @@ app.post("/create-booking", async (req, res) => {
     const tc = await taxicallerAddJob({ callerPhone, from, to, route });
     console.log("taxicaller response received");
 
+    // ✅ NEW RULES:
+    // - eta always present (fallback "Soon")
+    // - success true ONLY if booking_id exists
+    // - if booking_id missing: success false + specific error
     const booking_id =
-      tc?.data?.job?.id ?? tc?.jobId ?? tc?.job_id ?? tc?.id ?? null;
+      tc?.data?.job?.id ??
+      tc?.jobId ??
+      tc?.job_id ??
+      tc?.id ??
+      null;
 
-    const eta = tc?.data?.job?.eta_text ?? tc?.eta ?? null;
+    const etaRaw = tc?.data?.job?.eta_text ?? tc?.eta ?? null;
+    const eta = etaRaw ?? "Soon";
+
+    if (!booking_id) {
+      const out = {
+        success: false,
+        eta,
+        error: "Booking created but booking_id not found"
+      };
+      return toolCallId ? sendVapi(toolCallId, out, 500) : sendSimple(out, 500);
+    }
 
     const out = {
       success: true,
-      eta: eta || "Soon",
-      booking_id: booking_id ? String(booking_id) : null
+      eta,
+      booking_id: String(booking_id)
       // opcional para debugging:
       // taxicaller: tc
     };
