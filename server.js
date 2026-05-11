@@ -147,6 +147,85 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
 // Health check
 app.get("/", (req, res) => res.status(200).send("ok"));
 
+app.post("/create-booking", async (req, res) => {
+  const sendSimple = (payload, status = 200) => res.status(status).json(payload);
+  const sendVapi = (toolCallId, result, status = 200) =>
+    res.status(status).json({ results: [{ toolCallId, result }] });
+
+  // Detecta si viene de Vapi tool-calls (para responder con results[])
+  const getToolCallIdIfAny = (body) => {
+    if (!body) return null;
+    if (typeof body === "object") return body?.message?.toolCallList?.[0]?.id || null;
+    if (typeof body === "string") {
+      try {
+        const parsed = JSON.parse(body);
+        return parsed?.message?.toolCallList?.[0]?.id || null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
+  try {
+    requireEnv("TAXICALLER_BASE_URL");
+    requireEnv("TAXICALLER_DSESSION");
+    requireEnv("GOOGLE_MAPS_API_KEY");
+
+    // 1) Parse body
+    let body = req.body;
+    const toolCallId = getToolCallIdIfAny(body);
+
+    if (typeof body === "string") {
+      const s = body.trim();
+      body = s ? JSON.parse(s) : {};
+    }
+
+    // 2) Acepta payload normal o payload Vapi (arguments)
+    const vapiArgsRaw = body?.message?.toolCallList?.[0]?.function?.arguments;
+    let vapiArgs = {};
+    if (typeof vapiArgsRaw === "string") vapiArgs = vapiArgsRaw.trim() ? JSON.parse(vapiArgsRaw) : {};
+    else if (vapiArgsRaw && typeof vapiArgsRaw === "object") vapiArgs = vapiArgsRaw;
+
+    const customer_name = body.customer_name ?? vapiArgs.customer_name ?? "";
+    const callerPhone = body.customer_phone ?? vapiArgs.customer_phone ?? "";
+    const pickupAddress = body.pickup_address ?? vapiArgs.pickup_address ?? "";
+    const dropoffAddress = body.destination_address ?? vapiArgs.destination_address ?? "";
+    const passengers = Number(body.passengers ?? vapiArgs.passengers ?? 1);
+    const notes = String(body.notes ?? vapiArgs.notes ?? "");
+
+    if (!callerPhone || !pickupAddress || !dropoffAddress) {
+      const out = { success: false, error: "Missing customer_phone, pickup_address, or destination_address" };
+      return toolCallId ? sendVapi(toolCallId, out, 400) : sendSimple(out, 400);
+    }
+
+    // 3) Reutiliza tu lógica existente
+    const from = await geocode(pickupAddress);
+    const to = await geocode(dropoffAddress);
+    const route = await directions(from, to);
+
+    const tc = await taxicallerAddJob({ callerPhone, from, to, route });
+
+    const booking_id =
+      tc?.data?.job?.id ?? tc?.jobId ?? tc?.job_id ?? tc?.id ?? null;
+
+    const eta = tc?.data?.job?.eta_text ?? tc?.eta ?? null;
+
+    const out = {
+      success: true,
+      eta: eta || "Soon",
+      booking_id: booking_id ? String(booking_id) : null,
+      // opcional para debugging:
+      // taxicaller: tc
+    };
+
+    return toolCallId ? sendVapi(toolCallId, out) : sendSimple(out);
+  } catch (err) {
+    const out = { success: false, error: String(err?.message || err) };
+    const toolCallId = getToolCallIdIfAny(req.body);
+    return toolCallId ? sendVapi(toolCallId, out, 500) : sendSimple(out, 500);
+  }
+});
 // Vapi tool endpoint (simple JSON)
 app.post("/vapi/book-taxi", async (req, res) => {
   const respond = (toolCallId, result) =>
