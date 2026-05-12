@@ -503,6 +503,56 @@ app.get("/taxicaller/booker/token-probe", async (req, res) => {
       }
     });
 
+    // ✅ SAFE LOG: no JWT, only status + useful correlation headers
+    console.log("booker-token probe", {
+      status: tcRes.status,
+      contentType: tcRes.headers.get("content-type"),
+      xRequestId: tcRes.headers.get("x-request-id"),
+      xCorrelationId: tcRes.headers.get("x-correlation-id"),
+      date: tcRes.headers.get("date")
+    });
+
+    const text = await tcRes.text();
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {}
+
+    return res.status(200).json({
+      ok: tcRes.ok,
+      status: tcRes.status,
+      responseText: text,
+      responseJson: parsed
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+// ✅ TEMP: Probe booker-token using POST (in case GET is not supported in RC)
+app.post("/taxicaller/booker/token-probe-post", async (req, res) => {
+  try {
+    const jwt = await getOfficialTaxiCallerJwt();
+    const url = `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/booker/booker-token`;
+
+    const tcRes = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        authorization: `Bearer ${jwt}`
+      },
+      body: "{}"
+    });
+
+    console.log("booker-token probe POST", {
+      status: tcRes.status,
+      contentType: tcRes.headers.get("content-type"),
+      xRequestId: tcRes.headers.get("x-request-id"),
+      xCorrelationId: tcRes.headers.get("x-correlation-id"),
+      date: tcRes.headers.get("date")
+    });
+
     const text = await tcRes.text();
 
     let parsed = null;
