@@ -486,7 +486,39 @@ app.post("/taxicaller/booker/order-probe", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+// ✅ TEMP: Probe booker-token (TaxiCaller Official API / Booker API)
+// Does NOT affect Vapi flow.
+// Returns raw response so we can discover requirements for Booker API.
+app.get("/taxicaller/booker/token-probe", async (req, res) => {
+  try {
+    const jwt = await getOfficialTaxiCallerJwt();
+    const url = `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/booker/booker-token`;
 
+    const tcRes = await fetch(url, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${jwt}`
+      }
+    });
+
+    const text = await tcRes.text();
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {}
+
+    return res.status(200).json({
+      ok: tcRes.ok,
+      status: tcRes.status,
+      responseText: text,
+      responseJson: parsed
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 app.post("/create-booking", async (req, res) => {
   // 🔎 TRACE LOGS (para ver exactamente dónde se queda)
   console.log("HIT /create-booking", new Date().toISOString());
