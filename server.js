@@ -10,10 +10,92 @@ app.use(express.text({ type: "text/*", limit: "2mb" }));
 
 const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // https://dn1001-rc.taxicaller.net
 const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY (not "dsession=")
+const TAXICALLER_TCU = process.env.TAXICALLER_TCU; // "TCU ...."
+const TAXICALLER_JWT_TTL_SECONDS = Number(process.env.TAXICALLER_JWT_TTL_SECONDS || 3600);
+
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
 function requireEnv(name) {
   if (!process.env[name]) throw new Error(`Missing env var: ${name}`);
+}
+
+/**
+ * =========================
+ * TaxiCaller JWT cache layer
+ * =========================
+ * We cache the JWT in-memory and renew it before expiry.
+ */
+const JWT_RENEW_EARLY_SECONDS = 600; // renew 10 minutes before expiry
+let jwtCache = {
+  token: null,
+  expiresAtMs: 0
+};
+
+async function generateTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLER_JWT_TTL_SECONDS } = {}) {
+  requireEnv("TAXICALLER_BASE_URL");
+  requireEnv("TAXICALLER_TCU");
+
+  const url = `${TAXICALLER_BASE_URL}/DispatchApp/user`;
+
+  const payload = {
+    method: "jwt",
+    data: { sub, ttl: ttlSeconds },
+    type: "GET"
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "text/plain;charset=UTF-8",
+      authorization: TAXICALLER_TCU
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!res.ok) {
+    throw new Error(`TaxiCaller JWT error ${res.status}: ${text}`);
+  }
+
+  const token = data?.data?.token;
+  if (!token) {
+    throw new Error(`TaxiCaller JWT missing token. Response: ${text}`);
+  }
+
+  const now = Date.now();
+  jwtCache.token = token;
+  jwtCache.expiresAtMs = now + ttlSeconds * 1000;
+
+  // TEMPORARY SAFE LOG (no full token)
+  console.log("TaxiCaller JWT generated OK", {
+    hasToken: true,
+    sub: data?.data?.sub ?? sub,
+    expiresInSeconds: ttlSeconds
+  });
+
+  return token;
+}
+
+async function getTaxiCallerJwt() {
+  const now = Date.now();
+  const renewAtMs = jwtCache.expiresAtMs - JWT_RENEW_EARLY_SECONDS * 1000;
+
+  if (jwtCache.token && now < renewAtMs) return jwtCache.token;
+
+  return await generateTaxiCallerJwt({ sub: "*", ttlSeconds: TAXICALLER_JWT_TTL_SECONDS });
+}
+
+async function refreshTaxiCallerJwt() {
+  jwtCache.token = null;
+  jwtCache.expiresAtMs = 0;
+  return await getTaxiCallerJwt();
 }
 
 async function geocode(address) {
@@ -65,7 +147,7 @@ async function directions(from, to) {
 
 async function taxicallerAddJob({ callerPhone, from, to, route }) {
   requireEnv("TAXICALLER_BASE_URL");
-  requireEnv("TAXICALLER_DSESSION");
+  requireEnv("GOOGLE_MAPS_API_KEY");
 
   const url = `${TAXICALLER_BASE_URL}/DispatchApp/dispatch`;
 
@@ -118,17 +200,58 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
     }
   };
 
-  const dsessionValue = (TAXICALLER_DSESSION || "").trim();
-  if (!dsessionValue) throw new Error("Empty TAXICALLER_DSESSION");
+  const doRequestWithJwt = async () => {
+    // If TAXICALLER_TCU isn't configured, skip JWT path.
+    if (!process.env.TAXICALLER_TCU) return null;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      cookie: `dsession=${dsessionValue}`
-    },
-    body: JSON.stringify(payload)
-  });
+    const jwt = await getTaxiCallerJwt();
+
+    return await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${jwt}`
+      },
+      body: JSON.stringify(payload)
+    });
+  };
+
+  const doRequestWithDsession = async () => {
+    requireEnv("TAXICALLER_DSESSION");
+
+    const dsessionValue = (TAXICALLER_DSESSION || "").trim();
+    if (!dsessionValue) throw new Error("Empty TAXICALLER_DSESSION");
+
+    return await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: `dsession=${dsessionValue}`
+      },
+      body: JSON.stringify(payload)
+    });
+  };
+
+  // 1) Try JWT first (preferred)
+  let res = await doRequestWithJwt();
+
+  // If JWT path is unavailable, use dsession directly
+  if (!res) {
+    res = await doRequestWithDsession();
+  } else {
+    // If we got 401 with JWT: refresh + retry once
+    if (res.status === 401) {
+      console.log("TaxiCaller addjob got 401 (JWT). Refreshing JWT and retrying once...");
+      await refreshTaxiCallerJwt();
+      res = await doRequestWithJwt();
+
+      // If still 401, fallback to dsession (keeps service running)
+      if (res.status === 401) {
+        console.log("TaxiCaller addjob still 401 after JWT refresh. Falling back to dsession...");
+        res = await doRequestWithDsession();
+      }
+    }
+  }
 
   const text = await res.text();
 
@@ -178,7 +301,6 @@ app.post("/create-booking", async (req, res) => {
 
   try {
     requireEnv("TAXICALLER_BASE_URL");
-    requireEnv("TAXICALLER_DSESSION");
     requireEnv("GOOGLE_MAPS_API_KEY");
 
     // 1) Parse body
@@ -220,15 +342,7 @@ app.post("/create-booking", async (req, res) => {
     // - pickup + destination required
     // - phone required only if it is valid (otherwise ASK_PHONE_NUMBER)
     const phoneRaw = String(callerPhone || "").trim().toLowerCase();
-    const invalidPhones = new Set([
-      "",
-      "e.164",
-      "unknown",
-      "private",
-      "anonymous",
-      "blocked",
-      "unavailable"
-    ]);
+    const invalidPhones = new Set(["", "e.164", "unknown", "private", "anonymous", "blocked", "unavailable"]);
 
     if (!pickupAddress || !dropoffAddress) {
       const out = { success: false, error: "Missing pickup_address or destination_address" };
@@ -262,12 +376,7 @@ app.post("/create-booking", async (req, res) => {
     console.log("taxicaller response received");
 
     // Booking ID & ETA rules
-    const booking_id =
-      tc?.data?.job?.id ??
-      tc?.jobId ??
-      tc?.job_id ??
-      tc?.id ??
-      null;
+    const booking_id = tc?.data?.job?.id ?? tc?.jobId ?? tc?.job_id ?? tc?.id ?? null;
 
     const etaRaw = tc?.data?.job?.eta_text ?? tc?.eta ?? null;
     const eta = etaRaw ?? "Soon";
@@ -305,7 +414,6 @@ app.post("/vapi/book-taxi", async (req, res) => {
 
   try {
     requireEnv("TAXICALLER_BASE_URL");
-    requireEnv("TAXICALLER_DSESSION");
     requireEnv("GOOGLE_MAPS_API_KEY");
 
     // 1) Body parse seguro
