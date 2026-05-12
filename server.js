@@ -463,9 +463,10 @@ app.post("/taxicaller/booker/order-probe", async (req, res) => {
     const tcRes = await fetch(url, {
       method: "POST",
       headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${jwt}`
-      },
+  "content-type": "application/json",
+  accept: "application/json",
+  authorization: `Bearer ${jwt}`
+},
       body: JSON.stringify(payload)
     });
 
