@@ -13,6 +13,12 @@ const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY (not 
 const TAXICALLER_TCU = process.env.TAXICALLER_TCU; // "TCU ...."
 const TAXICALLER_JWT_TTL_SECONDS = Number(process.env.TAXICALLER_JWT_TTL_SECONDS || 3600);
 
+// ✅ OFFICIAL TaxiCaller Open API auth (RC)
+const TAXICALLER_API_KEY = process.env.TAXICALLER_API_KEY; // generated at https://app-rc.taxicaller.net/dispatch/api/keys
+const TAXICALLER_OFFICIAL_API_BASE_URL =
+  process.env.TAXICALLER_OFFICIAL_API_BASE_URL || "https://api-rc.taxicaller.net";
+const TAXICALLER_OFFICIAL_JWT_TTL_SECONDS = Number(process.env.TAXICALLER_OFFICIAL_JWT_TTL_SECONDS || 900);
+
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
 function requireEnv(name) {
@@ -44,7 +50,91 @@ function safeJsonSnippet(obj, maxLen = 1500) {
 
 /**
  * =========================
- * TaxiCaller JWT cache layer
+ * TaxiCaller OFFICIAL API JWT cache
+ * =========================
+ */
+const OFFICIAL_JWT_RENEW_EARLY_SECONDS = 120; // renew 2 minutes before expiry
+let officialJwtCache = {
+  token: null,
+  expiresAtMs: 0
+};
+
+function requireOfficialEnv() {
+  if (!TAXICALLER_API_KEY) throw new Error("Missing env var: TAXICALLER_API_KEY");
+}
+
+function clampTtl(ttl) {
+  const n = Number(ttl);
+  if (!Number.isFinite(n)) return 900;
+  return Math.max(60, Math.min(900, n));
+}
+
+async function generateOfficialTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLER_OFFICIAL_JWT_TTL_SECONDS } = {}) {
+  requireOfficialEnv();
+
+  const ttl = clampTtl(ttlSeconds);
+
+  const urlsToTry = [
+    `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/jwt/for-key`,
+    `${TAXICALLER_OFFICIAL_API_BASE_URL}/AdminService/v1/jwt/for-key`
+  ];
+
+  let lastErrText = null;
+
+  for (const baseUrl of urlsToTry) {
+    const url = `${baseUrl}?` + new URLSearchParams({ key: TAXICALLER_API_KEY, sub, ttl: String(ttl) }).toString();
+
+    const res = await fetch(url, { method: "GET" });
+    const text = await res.text();
+
+    if (!res.ok) {
+      lastErrText = `HTTP ${res.status}: ${text}`;
+      continue;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+
+    const token = data?.token ?? data?.data?.token ?? data?.jwt ?? data?.access_token ?? null;
+
+    if (!token || typeof token !== "string") {
+      lastErrText = `Missing token in response: ${text.slice(0, 300)}`;
+      continue;
+    }
+
+    const now = Date.now();
+    officialJwtCache.token = token;
+    officialJwtCache.expiresAtMs = now + ttl * 1000;
+
+    console.log("OFFICIAL JWT generated", {
+      hasToken: true,
+      endpoint: baseUrl.replace(TAXICALLER_OFFICIAL_API_BASE_URL, ""),
+      sub,
+      expiresInSeconds: ttl
+    });
+
+    return token;
+  }
+
+  throw new Error(`Official JWT generation failed. ${lastErrText || "Unknown error"}`);
+}
+
+async function getOfficialTaxiCallerJwt() {
+  const now = Date.now();
+  const renewAtMs = officialJwtCache.expiresAtMs - OFFICIAL_JWT_RENEW_EARLY_SECONDS * 1000;
+
+  if (officialJwtCache.token && now < renewAtMs) return officialJwtCache.token;
+
+  return await generateOfficialTaxiCallerJwt({ sub: "*", ttlSeconds: TAXICALLER_OFFICIAL_JWT_TTL_SECONDS });
+}
+
+/**
+ * =========================
+ * TaxiCaller JWT cache layer (legacy DispatchApp)
  * =========================
  * We cache the JWT in-memory and renew it before expiry.
  */
@@ -335,6 +425,17 @@ app.get("/routes-check", (req, res) => {
   res.json({ ok: true, hasCreateBooking: true });
 });
 app.get("/", (req, res) => res.status(200).send("ok"));
+
+// ✅ TEMP endpoint to test OFFICIAL JWT only (doesn't affect Vapi flow)
+// Remove later if you want.
+app.get("/taxicaller/official-jwt-check", async (req, res) => {
+  try {
+    const token = await getOfficialTaxiCallerJwt();
+    res.json({ ok: true, hasToken: Boolean(token), expiresAtMs: officialJwtCache.expiresAtMs });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 
 app.post("/create-booking", async (req, res) => {
   // 🔎 TRACE LOGS (para ver exactamente dónde se queda)
