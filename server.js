@@ -54,6 +54,9 @@ let jwtCache = {
   expiresAtMs: 0
 };
 
+// Sentinel error for "TCU not logged in"
+const ERR_TCU_NOT_LOGGED_IN = "TAXICALLER_TCU_NOT_LOGGED_IN";
+
 async function generateTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLER_JWT_TTL_SECONDS } = {}) {
   requireEnv("TAXICALLER_BASE_URL");
   requireEnv("TAXICALLER_TCU");
@@ -85,6 +88,13 @@ async function generateTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLER_JWT_TT
 
   if (!res.ok) {
     throw new Error(`TaxiCaller JWT error ${res.status}: ${text}`);
+  }
+
+  // ✅ Detect TCU session invalid (Not logged in)
+  if (data?.err_msg === "Not logged in" || data?.retcode === 9568258) {
+    const err = new Error(ERR_TCU_NOT_LOGGED_IN);
+    err.details = { err_msg: data?.err_msg, retcode: data?.retcode };
+    throw err;
   }
 
   const token = data?.data?.token;
@@ -259,7 +269,17 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
   };
 
   // 1) Try JWT first (preferred)
-  let res = await doRequestWithJwt();
+  let res;
+  try {
+    res = await doRequestWithJwt();
+  } catch (e) {
+    if (String(e?.message) === ERR_TCU_NOT_LOGGED_IN) {
+      console.log("JWT generation failed: Not logged in -> fallback to dsession");
+      res = await doRequestWithDsession();
+    } else {
+      throw e;
+    }
+  }
 
   // If JWT path is unavailable, use dsession directly
   if (!res) {
@@ -269,7 +289,17 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
     if (res.status === 401) {
       console.log("JWT retry after 401 (refresh + retry once)");
       await refreshTaxiCallerJwt();
-      res = await doRequestWithJwt();
+
+      try {
+        res = await doRequestWithJwt();
+      } catch (e) {
+        if (String(e?.message) === ERR_TCU_NOT_LOGGED_IN) {
+          console.log("JWT generation failed: Not logged in -> fallback to dsession");
+          res = await doRequestWithDsession();
+        } else {
+          throw e;
+        }
+      }
 
       // If still 401, fallback to dsession (keeps service running)
       if (res.status === 401) {
