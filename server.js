@@ -27,6 +27,22 @@ function requireEnv(name) {
   if (!process.env[name]) throw new Error(`Missing env var: ${name}`);
 }
 
+function requireProbeSecret(req, res, next) {
+  const expected = process.env.PROBE_SECRET;
+
+  // Misconfig protection: if you forgot to set it in Render
+  if (!expected) {
+    return res.status(500).json({ ok: false, error: "Missing env var: PROBE_SECRET" });
+  }
+
+  const got = String(req.header("x-probe-secret") || "");
+  if (got !== expected) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+
+  return next();
+}
+
 /**
  * =========================
  * SAFE LOGGING HELPERS
@@ -447,7 +463,7 @@ app.get("/taxicaller/official-jwt-check", async (req, res) => {
 });
 
 // ✅ ADDED: Probe endpoint to discover TaxiCaller booker/order schema (RC)
-app.post("/taxicaller/booker/order-probe", async (req, res) => {
+app.post("/taxicaller/booker/order-probe", requireProbeSecret, async (req, res) => {
   try {
     const jwt = await getOfficialTaxiCallerJwt();
     const url = `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/booker/order`;
@@ -490,7 +506,7 @@ app.post("/taxicaller/booker/order-probe", async (req, res) => {
 // ✅ TEMP: Probe booker-token (TaxiCaller Official API / Booker API)
 // Does NOT affect Vapi flow.
 // Returns raw response so we can discover requirements for Booker API.
-app.get("/taxicaller/booker/token-probe", async (req, res) => {
+app.get("/taxicaller/booker/token-probe", requireProbeSecret, async (req, res) => {
   try {
     const jwt = await getOfficialTaxiCallerJwt();
     const url = `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/booker/booker-token`;
@@ -530,7 +546,7 @@ app.get("/taxicaller/booker/token-probe", async (req, res) => {
   }
 });
 // ✅ TEMP: Probe booker-token using POST (in case GET is not supported in RC)
-app.post("/taxicaller/booker/token-probe-post", async (req, res) => {
+app.post("/taxicaller/booker/token-probe-post", requireProbeSecret, async (req, res) => {
   try {
     const jwt = await getOfficialTaxiCallerJwt();
     const url = `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/booker/booker-token`;
