@@ -21,6 +21,29 @@ function requireEnv(name) {
 
 /**
  * =========================
+ * SAFE LOGGING HELPERS
+ * =========================
+ * We avoid logging sensitive data (phones, tokens, headers).
+ */
+function maskPhone(s) {
+  const str = String(s ?? "");
+  // mask digits leaving only last 2 digits visible
+  return str.replace(/\d(?=\d{2})/g, "*");
+}
+
+function safeJsonSnippet(obj, maxLen = 1500) {
+  try {
+    const raw = JSON.stringify(obj);
+    // mask phone-like patterns (best effort)
+    const masked = raw.replace(/\+?\d[\d\-\s().]{7,}\d/g, (m) => maskPhone(m));
+    return masked.slice(0, maxLen);
+  } catch {
+    return "[unstringifiable]";
+  }
+}
+
+/**
+ * =========================
  * TaxiCaller JWT cache layer
  * =========================
  * We cache the JWT in-memory and renew it before expiry.
@@ -332,9 +355,10 @@ app.post("/create-booking", async (req, res) => {
     const passengers = Number(body.passengers ?? vapiArgs.passengers ?? 1);
     const notes = String(body.notes ?? vapiArgs.notes ?? "");
 
+    // safer: mask phone in logs
     console.log("create-booking args:", {
       customer_name,
-      callerPhone,
+      callerPhone: maskPhone(callerPhone),
       pickupAddress,
       dropoffAddress,
       passengers,
@@ -383,12 +407,22 @@ app.post("/create-booking", async (req, res) => {
     const eta = etaRaw ?? "Soon";
 
     if (!booking_id) {
+      // Render-only safe debug log
+      console.log("WARN: BOOKING_ID_NOT_FOUND", {
+        retcode: tc?.retcode,
+        topKeys: tc && typeof tc === "object" ? Object.keys(tc) : [],
+        dataKeys: tc?.data && typeof tc.data === "object" ? Object.keys(tc.data) : [],
+        snippet: safeJsonSnippet(tc, 1500)
+      });
+
+      // Do NOT fail user experience
       const out = {
-        success: false,
+        success: true,
         eta,
-        error: "Booking created but booking_id not found"
+        booking_id: null,
+        warning: "BOOKING_ID_NOT_FOUND"
       };
-      return toolCallId ? sendVapi(toolCallId, out, 500) : sendSimple(out, 500);
+      return toolCallId ? sendVapi(toolCallId, out) : sendSimple(out);
     }
 
     const out = {
