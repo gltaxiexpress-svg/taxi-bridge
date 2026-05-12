@@ -318,6 +318,11 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
     data = { raw: text };
   }
 
+  // ✅ IMPORTANT: Treat "Not logged in" as a real error even if HTTP is 200
+  if (data?.err_msg === "Not logged in" || data?.retcode === 9568258) {
+    throw new Error(`Taxicaller auth error: ${data?.err_msg} (retcode ${data?.retcode})`);
+  }
+
   if (!res.ok) {
     throw new Error(`Taxicaller error ${res.status}: ${text}`);
   }
@@ -464,7 +469,16 @@ app.post("/create-booking", async (req, res) => {
     return toolCallId ? sendVapi(toolCallId, out) : sendSimple(out);
   } catch (err) {
     console.log("ERROR /create-booking:", err);
-    const out = { success: false, error: String(err?.message || err) };
+
+    // ✅ If TaxiCaller auth is broken, tell Vapi to transfer
+    const msg = String(err?.message || err);
+    if (msg.includes("Taxicaller auth error: Not logged in") || msg.includes("(retcode 9568258)")) {
+      const out = { success: false, error: "DISPATCHER_TRANSFER" };
+      const toolCallId = getToolCallIdIfAny(req.body);
+      return toolCallId ? sendVapi(toolCallId, out, 500) : sendSimple(out, 500);
+    }
+
+    const out = { success: false, error: msg };
     const toolCallId = getToolCallIdIfAny(req.body);
     return toolCallId ? sendVapi(toolCallId, out, 500) : sendSimple(out, 500);
   }
