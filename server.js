@@ -607,6 +607,14 @@ app.post("/vapi/book-taxi", async (req, res) => {
   }
 });
 
+// (optional) self-check on boot:
+// set TAXICALLER_OFFICIAL_JWT_BOOT_CHECK=true to enable
+if (process.env.TAXICALLER_OFFICIAL_JWT_BOOT_CHECK === "true") {
+  getOfficialTaxiCallerJwt().catch((e) =>
+    console.log("OFFICIAL JWT boot check failed:", e?.message || e)
+  );
+}
+
 // ✅ ESTO VA AL FINAL DEL ARCHIVO (fuera de cualquier endpoint)
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
