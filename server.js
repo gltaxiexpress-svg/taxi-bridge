@@ -446,6 +446,47 @@ app.get("/taxicaller/official-jwt-check", async (req, res) => {
   }
 });
 
+// ✅ ADDED: Probe endpoint to discover TaxiCaller booker/order schema (RC)
+app.post("/taxicaller/booker/order-probe", async (req, res) => {
+  try {
+    const jwt = await getOfficialTaxiCallerJwt();
+    const url = `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/booker/order`;
+
+    let body = req.body;
+    if (typeof body === "string") {
+      const s = body.trim();
+      body = s ? JSON.parse(s) : {};
+    }
+
+    const payload = body && typeof body === "object" ? body : {};
+
+    const tcRes = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${jwt}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await tcRes.text();
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {}
+
+    return res.status(200).json({
+      ok: tcRes.ok,
+      status: tcRes.status,
+      responseText: text,
+      responseJson: parsed
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.post("/create-booking", async (req, res) => {
   // 🔎 TRACE LOGS (para ver exactamente dónde se queda)
   console.log("HIT /create-booking", new Date().toISOString());
