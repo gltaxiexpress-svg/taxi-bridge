@@ -18,6 +18,8 @@ const TAXICALLER_API_KEY = process.env.TAXICALLER_API_KEY; // generated at https
 const TAXICALLER_OFFICIAL_API_BASE_URL =
   process.env.TAXICALLER_OFFICIAL_API_BASE_URL || "https://api-rc.taxicaller.net";
 const TAXICALLER_OFFICIAL_JWT_TTL_SECONDS = Number(process.env.TAXICALLER_OFFICIAL_JWT_TTL_SECONDS || 900);
+// ✅ subject for official JWT (set in Render)
+const TAXICALLER_OFFICIAL_JWT_SUBJECT = process.env.TAXICALLER_OFFICIAL_JWT_SUBJECT || "*";
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
@@ -69,7 +71,10 @@ function clampTtl(ttl) {
   return Math.max(60, Math.min(900, n));
 }
 
-async function generateOfficialTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLER_OFFICIAL_JWT_TTL_SECONDS } = {}) {
+async function generateOfficialTaxiCallerJwt({
+  sub = TAXICALLER_OFFICIAL_JWT_SUBJECT,
+  ttlSeconds = TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
+} = {}) {
   requireOfficialEnv();
 
   const ttl = clampTtl(ttlSeconds);
@@ -82,7 +87,8 @@ async function generateOfficialTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLE
   let lastErrText = null;
 
   for (const baseUrl of urlsToTry) {
-    const url = `${baseUrl}?` + new URLSearchParams({ key: TAXICALLER_API_KEY, sub, ttl: String(ttl) }).toString();
+    const key = String(TAXICALLER_API_KEY || "").trim();
+    const url = `${baseUrl}?` + new URLSearchParams({ key, sub, ttl: String(ttl) }).toString();
 
     const res = await fetch(url, { method: "GET" });
     const text = await res.text();
@@ -129,7 +135,10 @@ async function getOfficialTaxiCallerJwt() {
 
   if (officialJwtCache.token && now < renewAtMs) return officialJwtCache.token;
 
-  return await generateOfficialTaxiCallerJwt({ sub: "*", ttlSeconds: TAXICALLER_OFFICIAL_JWT_TTL_SECONDS });
+  return await generateOfficialTaxiCallerJwt({
+    sub: TAXICALLER_OFFICIAL_JWT_SUBJECT,
+    ttlSeconds: TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
+  });
 }
 
 /**
