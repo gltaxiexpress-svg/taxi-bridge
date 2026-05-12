@@ -73,8 +73,8 @@ async function generateTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLER_JWT_TT
   jwtCache.token = token;
   jwtCache.expiresAtMs = now + ttlSeconds * 1000;
 
-  // TEMPORARY SAFE LOG (no full token)
-  console.log("TaxiCaller JWT generated OK", {
+  // SAFE LOG (no full token)
+  console.log("JWT generated", {
     hasToken: true,
     sub: data?.data?.sub ?? sub,
     expiresInSeconds: ttlSeconds
@@ -93,6 +93,7 @@ async function getTaxiCallerJwt() {
 }
 
 async function refreshTaxiCallerJwt() {
+  console.log("JWT refreshed (forced)");
   jwtCache.token = null;
   jwtCache.expiresAtMs = 0;
   return await getTaxiCallerJwt();
@@ -204,6 +205,7 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
     // If TAXICALLER_TCU isn't configured, skip JWT path.
     if (!process.env.TAXICALLER_TCU) return null;
 
+    console.log("Auth method: JWT");
     const jwt = await getTaxiCallerJwt();
 
     return await fetch(url, {
@@ -219,6 +221,7 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
   const doRequestWithDsession = async () => {
     requireEnv("TAXICALLER_DSESSION");
 
+    console.log("Auth method: DSESSION (fallback)");
     const dsessionValue = (TAXICALLER_DSESSION || "").trim();
     if (!dsessionValue) throw new Error("Empty TAXICALLER_DSESSION");
 
@@ -241,13 +244,13 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
   } else {
     // If we got 401 with JWT: refresh + retry once
     if (res.status === 401) {
-      console.log("TaxiCaller addjob got 401 (JWT). Refreshing JWT and retrying once...");
+      console.log("JWT retry after 401 (refresh + retry once)");
       await refreshTaxiCallerJwt();
       res = await doRequestWithJwt();
 
       // If still 401, fallback to dsession (keeps service running)
       if (res.status === 401) {
-        console.log("TaxiCaller addjob still 401 after JWT refresh. Falling back to dsession...");
+        console.log("Fallback to dsession (JWT still 401 after retry)");
         res = await doRequestWithDsession();
       }
     }
@@ -338,9 +341,7 @@ app.post("/create-booking", async (req, res) => {
       notes
     });
 
-    // ✅ UPDATED VALIDATION:
-    // - pickup + destination required
-    // - phone required only if it is valid (otherwise ASK_PHONE_NUMBER)
+    // ✅ UPDATED VALIDATION (kept as-is for now)
     const phoneRaw = String(callerPhone || "").trim().toLowerCase();
     const invalidPhones = new Set(["", "e.164", "unknown", "private", "anonymous", "blocked", "unavailable"]);
 
@@ -394,8 +395,6 @@ app.post("/create-booking", async (req, res) => {
       success: true,
       eta,
       booking_id: String(booking_id)
-      // opcional para debugging:
-      // taxicaller: tc
     };
 
     return toolCallId ? sendVapi(toolCallId, out) : sendSimple(out);
@@ -425,7 +424,6 @@ app.post("/vapi/book-taxi", async (req, res) => {
 
     // ... tu código igual ...
   } catch (err) {
-    // ... tu catch igual ...
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
