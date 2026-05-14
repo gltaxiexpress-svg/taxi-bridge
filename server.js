@@ -22,7 +22,8 @@ const app = express();
  * =========================
  * BODY PARSING
  * =========================
- * Accept JSON normally; also accept text/plain that contains JSON.
+ * We accept EVERYTHING as text to avoid express.json() crashes.
+ * We will JSON.parse manually in parseBodyOnce().
  */
 app.use(express.text({ type: "*/*", limit: "2mb" }));
 
@@ -91,23 +92,28 @@ function isLikelyE164(phone) {
 
 /**
  * Parse request body exactly once in a route.
- * - If JSON: req.body is already an object.
- * - If text: req.body is a string; tolerate BOM/garbage/control chars before "{"
+ * - With express.text("*/*") it should be a string,
+ *   but we also handle Buffer/other types defensively.
  */
 function parseBodyOnce(req) {
-  if (req.body && typeof req.body === "object") return req.body;
+  // If some middleware already produced an object (rare here), accept it.
+  if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) return req.body;
 
-  const raw = typeof req.body === "string" ? req.body : "";
+  const raw =
+    typeof req.body === "string"
+      ? req.body
+      : Buffer.isBuffer(req.body)
+        ? req.body.toString("utf8")
+        : String(req.body || "");
+
   if (!raw) return {};
 
-  // DIAGNOSTIC: shows the first bytes arriving at the server
   console.log("[parseBodyOnce] rawHead", {
     len: raw.length,
     head: raw.slice(0, 40),
     codes: Array.from(raw.slice(0, 12)).map((c) => c.charCodeAt(0))
   });
 
-  // Remove BOM + leading control characters (0x00-0x1F) that can break JSON.parse
   const cleanedPrefix = raw
     .replace(/^\uFEFF/, "")
     .replace(/^[\u0000-\u001F]+/, "");
