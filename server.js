@@ -640,23 +640,7 @@ async function createBookerOrderOfficial({
   return { success: true, booking_id: String(bookingId), eta: "Soon" };
 }
 
-  const orderToken = data?.order_token ?? null;
-  const bookingId = data?.order?.order_id ?? null;
-
-  console.log("[OFFICIAL BOOKER] parsed", {
-    hasOrderToken: Boolean(orderToken),
-    orderTokenPreview: orderToken ? redact(orderToken) : null,
-    bookingId: bookingId ? String(bookingId) : null
-  });
-
-  if (!bookingId) {
-    return {
-      success: false,
-      error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}`
-    };
-  }
-
-  // ETA isn't included in the example; keep default
+// ETA isn't included in the example; keep default
   return {
     success: true,
     booking_id: String(bookingId),
