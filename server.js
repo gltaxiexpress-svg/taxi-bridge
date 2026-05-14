@@ -640,13 +640,6 @@ async function createBookerOrderOfficial({
   return { success: true, booking_id: String(bookingId), eta: "Soon" };
 }
 
-// ETA isn't included in the example; keep default
-  return {
-    success: true,
-    booking_id: String(bookingId),
-    eta: "Soon"
-  };
-}
 /**
  * =========================
  * PROBES (protected by PROBE_SECRET)
