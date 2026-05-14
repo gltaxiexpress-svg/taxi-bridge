@@ -24,8 +24,7 @@ const app = express();
  * =========================
  * Accept JSON normally; also accept text/plain that contains JSON.
  */
-app.use(express.json({ limit: "2mb" }));
-app.use(express.text({ type: ["text/plain", "text/*"], limit: "2mb" }));
+app.use(express.text({ type: "*/*", limit: "2mb" }));
 
 /**
  * =========================
