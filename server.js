@@ -654,44 +654,35 @@ async function createBookerOrderOfficial({
   }
 
   if (!res.ok) {
-    return { success: false, error: `Booker order error ${res.status}: ${String(text).slice(0, 500)}` };
+  return { success: false, error: `Booker order error ${res.status}: ${String(text).slice(0, 500)}` };
+}
+
+const orderToken = data?.order_token ?? null;
+const bookingId = data?.order?.order_id ?? null;
+const jobId = data?.meta?.job_id ?? null;
+
+console.log("[OFFICIAL BOOKER] parsed", {
+  hasOrderToken: Boolean(orderToken),
+  orderTokenPreview: orderToken ? redact(orderToken) : null,
+  bookingId: bookingId ? String(bookingId) : null,
+  jobId: jobId != null ? String(jobId) : null
+});
+
+if (!bookingId) {
+  return { success: false, error: `Missing response.order.order_id. Preview: ${safeJsonSnippet(data, 800)}` };
+}
+
+let assigned = false;
+if (AUTO_ASSIGN_BOOKER) {
+  const assignResult = await assignBookerOrderOfficial(bookingId);
+  assigned = Boolean(assignResult?.ok);
+
+  if (!assigned) {
+    console.log("[OFFICIAL ASSIGN] failed (non-fatal)", {
+      bookingId: String(bookingId),
+      error: assignResult?.error || "unknown"
+    });
   }
-
-  const orderToken = data?.order_token ?? null;
-  const bookingId = data?.order?.order_id ?? null;
-  const jobId = data?.meta?.job_id ?? null;
-  
-  console.log("[OFFICIAL BOOKER] parsed", {
-    hasOrderToken: Boolean(orderToken),
-    orderTokenPreview: orderToken ? redact(orderToken) : null,
-    bookingId: bookingId ? String(bookingId) : null
-  });
-
-  if (!bookingId) {
-    return { success: false, error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}` };
-  }
-
-  let assigned = false;
-
-  if (AUTO_ASSIGN_BOOKER) {
-    const assignResult = await assignBookerOrderOfficial(bookingId);
-    assigned = Boolean(assignResult?.ok);
-
-    if (!assigned) {
-      console.log("[OFFICIAL ASSIGN] failed (non-fatal)", {
-        bookingId: String(bookingId),
-        error: assignResult?.error || "unknown"
-      });
-    }
-  }
-
-  return {
-    success: true,
-    booking_id: String(bookingId),
-    job_id: jobId != null ? String(jobId) : null,
-    assigned,
-    eta: "Soon"
-  };
 }
 
 return {
@@ -701,7 +692,6 @@ return {
   assigned,
   eta: "Soon"
 };
-}
 /**
  * =========================
  * PROBES (protected by PROBE_SECRET)
