@@ -560,7 +560,8 @@ async function createBookerOrderOfficial({
   const to = await geocode(destination_address);
 
   console.log("[OFFICIAL] directions...");
-  const r = await directions(from, to);
+ const r = await directions(from, to);
+const route = { dist: r.dist, edur: r.edur, route_points: [] };
 
   const jwt = await getOfficialTaxiCallerJwt();
 
