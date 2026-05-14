@@ -654,7 +654,7 @@ async function createBookerOrderOfficial({
     data = { raw: text };
   }
 
-  if (!res.ok) {
+ if (!res.ok) {
   return { success: false, error: `Booker order error ${res.status}: ${String(text).slice(0, 500)}` };
 }
 
@@ -670,10 +670,14 @@ console.log("[OFFICIAL BOOKER] parsed", {
 });
 
 if (!bookingId) {
-  return { success: false, error: `Missing response.order.order_id. Preview: ${safeJsonSnippet(data, 800)}` };
+  return {
+    success: false,
+    error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}`
+  };
 }
 
 let assigned = false;
+
 if (AUTO_ASSIGN_BOOKER) {
   const assignResult = await assignBookerOrderOfficial(bookingId);
   assigned = Boolean(assignResult?.ok);
