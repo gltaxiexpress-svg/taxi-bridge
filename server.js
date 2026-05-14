@@ -156,8 +156,7 @@ async function directions(from, to) {
     pts.push(...toE6([step.start_location.lng, step.start_location.lat]));
   }
   pts.push(...toE6([leg.end_location.lng, leg.end_location.lat]));
-
-   dist, edur, pts };
+  return { dist, edur, pts };
 }
 /**
  * =========================
@@ -543,7 +542,6 @@ async function assignBookerOrderOfficial(orderId) {
 
   const jwt = await getOfficialTaxiCallerJwt();
   const id = encodeURIComponent(String(orderId || "").trim());
-
   const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, `/api/v1/booker/order/${id}/assign`);
 
   console.log("[OFFICIAL ASSIGN] request", { method: "POST", url });
@@ -551,9 +549,11 @@ async function assignBookerOrderOfficial(orderId) {
   const res = await fetch(url, {
     method: "POST",
     headers: {
-      accept: "application/json",
-      authorization: `Bearer ${jwt}`
-    }
+  "content-type": "application/json",
+  accept: "application/json",
+  authorization: `Bearer ${jwt}`
+},
+body: "{}"
   });
 
   const text = await res.text();
@@ -895,8 +895,8 @@ app.post("/create-booking", async (req, res) => {
     const to = await geocode(dropoffAddress);
 
     // Keep legacy route_points empty unless you want to restore your legacy route_points logic
-    const route = { dist: 0, edur: 0, route_points: [] };
-
+    const r = await directions(from, to);
+    const route = { dist: r.dist, edur: r.edur, route_points: [] };
     console.log("[LEGACY] sending addjob...");
     const tc = await taxicallerAddJob({ callerPhone, from, to, route });
 
