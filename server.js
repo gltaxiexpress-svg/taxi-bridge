@@ -1,12 +1,10 @@
 /**
  * server.js (ESM)
- * Safe architecture:
- * Vapi -> POST /create-booking -> Render -> TaxiCaller
+ * SAFE rollout:
+ * - /create-booking stays LEGACY by default
+ * - USE_OFFICIAL_BOOKER=true switches /create-booking to Official Booker API
  *
- * Default: LEGACY (DispatchApp addjob)
- * Feature flag: USE_OFFICIAL_BOOKER=true  => Official Booker API (/api/v1/booker/order)
- *
- * Part 1/3: base server, env, helpers, maps, JWTs (legacy + official)
+ * Probes are protected by PROBE_SECRET.
  */
 
 import express from "express";
@@ -26,7 +24,7 @@ app.use(express.text({ type: "text/*", limit: "2mb" }));
  */
 const USE_OFFICIAL_BOOKER = String(process.env.USE_OFFICIAL_BOOKER || "").toLowerCase() === "true";
 
-// Legacy DispatchApp base (your existing)
+// Legacy DispatchApp base (existing)
 const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // e.g. https://dn1001-rc.taxicaller.net
 const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY
 const TAXICALLER_TCU = process.env.TAXICALLER_TCU; // "TCU ...."
@@ -57,9 +55,6 @@ function requireOfficialEnv() {
   requireEnv("TAXICALLER_COMPANY_ID");
 }
 
-/**
- * Probe secret middleware
- */
 function requireProbeSecret(req, res, next) {
   const expected = process.env.PROBE_SECRET;
   if (!expected) return res.status(500).json({ ok: false, error: "Missing env var: PROBE_SECRET" });
@@ -101,6 +96,7 @@ function joinUrl(base, path) {
   return `${String(base || "").replace(/\/+$/, "")}/${String(path || "").replace(/^\/+/, "")}`;
 }
 
+// Taxicaller wants [Long, Lat] multiplied by 1e6 and rounded to integers
 function toE6([lon, lat]) {
   return [Math.round(lon * 1e6), Math.round(lat * 1e6)];
 }
@@ -153,7 +149,7 @@ async function directions(from, to) {
   const dist = leg.distance.value; // meters
   const edur = leg.duration.value; // seconds
 
-  // Flattened E6 pts: [lonE6, latE6, lonE6, latE6, ...]
+  // Flattened E6 pts array: [lonE6, latE6, lonE6, latE6, ...]
   const pts = [];
   for (const step of leg.steps) {
     pts.push(...toE6([step.start_location.lng, step.start_location.lat]));
@@ -162,10 +158,9 @@ async function directions(from, to) {
 
   return { dist, edur, pts };
 }
-
 /**
  * =========================
- * OFFICIAL JWT cache
+ * OFFICIAL JWT cache (GET /api/v1/jwt/for-key?key=...&sub=...&ttl=...)
  * =========================
  */
 const OFFICIAL_JWT_RENEW_EARLY_SECONDS = 120;
@@ -184,41 +179,36 @@ async function generateOfficialTaxiCallerJwt({
   requireOfficialEnv();
 
   const ttl = clampTtl(ttlSeconds);
+  const key = String(TAXICALLER_API_KEY || "").trim();
 
-  // Try both RC endpoints; log url + method + status to confirm.
+  // Some environments also expose /AdminService; we try both.
   const endpointPathsToTry = ["/api/v1/jwt/for-key", "/AdminService/v1/jwt/for-key"];
 
   let lastErrText = null;
 
   for (const path of endpointPathsToTry) {
-    const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, path);
+    const base = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, path);
 
-    console.log("[OFFICIAL JWT] request", {
-      method: "POST",
-      url,
-      endpointPath: path,
-      sub,
-      ttl,
-      apiKeyPreview: redact(TAXICALLER_API_KEY)
-    });
+    // Real URL (contains real key) - do NOT log this.
+    const qs = new URLSearchParams({ key, sub, ttl: String(ttl) }).toString();
+    const url = `${base}?${qs}`;
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({
-        key: TAXICALLER_API_KEY,
-        sub,
-        ttl
-      })
-    });
+    // Safe URL for logs (redacted key)
+    const safeQs = new URLSearchParams({ key: redact(key), sub, ttl: String(ttl) }).toString();
+    const safeUrl = `${base}?${safeQs}`;
 
+    console.log("[OFFICIAL JWT] request", { method: "GET", endpointPath: path, url: safeUrl });
+
+    const res = await fetch(url, { method: "GET" });
     const text = await res.text();
 
     console.log("[OFFICIAL JWT] response", {
       status: res.status,
       ok: res.ok,
       contentType: res.headers.get("content-type"),
-      bodyPreview: text.slice(0, 300)
+      bodyPreview: text.slice(0, 300),
+      xRequestId: res.headers.get("x-request-id"),
+      xCorrelationId: res.headers.get("x-correlation-id")
     });
 
     if (!res.ok) {
@@ -234,7 +224,6 @@ async function generateOfficialTaxiCallerJwt({
     }
 
     const token = data?.token ?? data?.data?.token ?? data?.jwt ?? data?.access_token ?? null;
-
     if (!token || typeof token !== "string") {
       lastErrText = `Missing token in response: ${text.slice(0, 300)}`;
       continue;
@@ -254,6 +243,7 @@ async function generateOfficialTaxiCallerJwt({
 async function getOfficialTaxiCallerJwt() {
   const now = Date.now();
   const renewAtMs = officialJwtCache.expiresAtMs - OFFICIAL_JWT_RENEW_EARLY_SECONDS * 1000;
+
   if (officialJwtCache.token && now < renewAtMs) return officialJwtCache.token;
 
   return await generateOfficialTaxiCallerJwt({
@@ -264,7 +254,7 @@ async function getOfficialTaxiCallerJwt() {
 
 /**
  * =========================
- * LEGACY JWT cache (DispatchApp)
+ * LEGACY JWT cache (DispatchApp) + TCU session detection
  * =========================
  */
 const JWT_RENEW_EARLY_SECONDS = 600;
@@ -303,6 +293,7 @@ async function generateTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLER_JWT_TT
 
   if (!res.ok) throw new Error(`TaxiCaller JWT error ${res.status}: ${text}`);
 
+  // Detect invalid session (can come as 200 with error payload)
   if (data?.err_msg === "Not logged in" || data?.retcode === 9568258) {
     const err = new Error(ERR_TCU_NOT_LOGGED_IN);
     err.details = { err_msg: data?.err_msg, retcode: data?.retcode };
@@ -323,6 +314,7 @@ async function generateTaxiCallerJwt({ sub = "*", ttlSeconds = TAXICALLER_JWT_TT
 async function getTaxiCallerJwt() {
   const now = Date.now();
   const renewAtMs = jwtCache.expiresAtMs - JWT_RENEW_EARLY_SECONDS * 1000;
+
   if (jwtCache.token && now < renewAtMs) return jwtCache.token;
 
   return await generateTaxiCallerJwt({ sub: "*", ttlSeconds: TAXICALLER_JWT_TTL_SECONDS });
@@ -336,9 +328,8 @@ async function refreshTaxiCallerJwt() {
 }
 /**
  * =========================
- * LEGACY: DispatchApp addjob (kept as-is conceptually)
+ * LEGACY: DispatchApp addjob (kept for production default)
  * =========================
- * Uses legacy auth: JWT via TCU, fallback to dsession.
  */
 async function taxicallerAddJob({ callerPhone, from, to, route }) {
   requireEnv("TAXICALLER_BASE_URL");
@@ -468,9 +459,11 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
     data = { raw: text };
   }
 
+  // Treat "Not logged in" as error even if HTTP 200
   if (data?.err_msg === "Not logged in" || data?.retcode === 9568258) {
     throw new Error(`Taxicaller auth error: ${data?.err_msg} (retcode ${data?.retcode})`);
   }
+
   if (!res.ok) throw new Error(`Taxicaller error ${res.status}: ${text}`);
 
   return data;
@@ -478,69 +471,69 @@ async function taxicallerAddJob({ callerPhone, from, to, route }) {
 
 /**
  * =========================
- * OFFICIAL: Booker order payload builder
+ * OFFICIAL: Booker order payload (matches TaxiCaller documentation)
+ * booking_id MUST be: response.order.order_id
  * =========================
- * This is a BASE template. TaxiCaller may require additional fields.
- * Use /taxicaller/booker/order-probe with Johan's "Example Value" to perfect it.
  */
-function buildBookerOrderPayloadBase({ pickup, dropoff, customerPhone, notes = "" }) {
-  const company_id = TAXICALLER_COMPANY_ID;
-
-  const passenger = {
-    name: "Caller",
-    email: "",
-    phone: customerPhone
-  };
-
-  const requireObj = {
-    seats: 1,
-    wc: 0,
-    bags: 0
-  };
-
-  const pickupCoords = toE6([pickup.lon, pickup.lat]);
+function buildOfficialBookerOrderPayload({ pickup, dropoff, customerPhone, notes = "" }) {
+  const pickupCoords = toE6([pickup.lon, pickup.lat]);   // [lonE6, latE6]
   const dropoffCoords = toE6([dropoff.lon, dropoff.lat]);
 
   return {
-    company_id,
+    order: {
+      company_id: TAXICALLER_COMPANY_ID,
+      provider_id: 0,
 
-    // Often required fields (depends on docs)
-    provider_id: 0,
-    client_id: 0,
-
-    times: {
-      arrive: { target: 0 } // ASAP
-    },
-
-    items: [
-      {
-        "@type": "passengers",
-        seq: 0,
-        passenger,
-        require: requireObj,
-        notes: String(notes || "")
-      }
-    ],
-
-    route: {
-      nodes: [
-        { "@type": "pickup", seq: 0, text: pickup.text, coords: pickupCoords },
-        { "@type": "dropoff", seq: 1, text: dropoff.text, coords: dropoffCoords }
-      ],
-      legs: [
+      items: [
         {
+          "@type": "passengers",
           seq: 0,
-          pts: [] // fill from directions
+          passenger: {
+            name: "Caller",
+            phone: customerPhone,
+            email: ""
+          },
+          client_id: 0,
+          account: { id: 0, extra: null }, // can be null in docs; explicit is ok
+          require: { seats: 1, wc: 0, bags: 0 },
+          pay_info: [
+            {
+              "@t": 0, // CASH
+              data: null
+            }
+          ]
         }
       ],
-      meta: {
-        dist: 0,
-        est_dur: 0
-      }
-    },
 
-    pay_info: {
-      method: "cash"
+      route: {
+        nodes: [
+          {
+            actions: [{ "@type": "client_action", item_seq: 0, action: "in" }],
+            location: { name: pickup.text, coords: pickupCoords },
+            times: { arrive: { target: 0, latest: 0 } }, // ASAP
+            info: { all: String(notes || "") },
+            seq: 0
+          },
+          {
+            actions: [{ "@type": "client_action", item_seq: 0, action: "out" }],
+            location: { name: dropoff.text, coords: dropoffCoords },
+            times: null,
+            info: {},
+            seq: 1
+          }
+        ],
+
+        legs: [
+          {
+            meta: { dist: 0, est_dur: 0 },
+            pts: [],
+            from_seq: 0,
+            to_seq: 1
+          }
+        ],
+
+        meta: { dist: 0, est_dur: 0 }
+      }
     }
   };
 }
@@ -571,17 +564,21 @@ async function createBookerOrderOfficial({
 
   const jwt = await getOfficialTaxiCallerJwt();
 
-  const payload = buildBookerOrderPayloadBase({
+  const payload = buildOfficialBookerOrderPayload({
     pickup: from,
     dropoff: to,
     customerPhone: customer_phone,
     notes
   });
 
-  // Inject route computed values
-  payload.route.meta.dist = r.dist;
-  payload.route.meta.est_dur = r.edur;
-  payload.route.legs[0].pts = r.pts;
+  // Inject route computed values into correct locations per doc
+  payload.order.route.meta.dist = r.dist;
+  payload.order.route.meta.est_dur = r.edur;
+
+  payload.order.route.legs[0].meta.dist = r.dist;
+  payload.order.route.legs[0].meta.est_dur = r.edur;
+
+  payload.order.route.legs[0].pts = r.pts;
 
   const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, "/api/v1/booker/order");
 
@@ -603,15 +600,20 @@ async function createBookerOrderOfficial({
 
   const text = await res.text();
 
+  // Redact order_token in preview if present
+  const safeTextPreview = String(text || "")
+    .replace(/"order_token"\s*:\s*"([^"]+)"/, (_m, tok) => `"order_token":"${redact(tok)}"`)
+    .slice(0, 800);
+
   console.log("[OFFICIAL BOOKER] response", {
     status: res.status,
     ok: res.ok,
-    bodyPreview: text.slice(0, 800),
+    bodyPreview: safeTextPreview,
     xRequestId: res.headers.get("x-request-id"),
     xCorrelationId: res.headers.get("x-correlation-id")
   });
 
-  let data = null;
+  let data;
   try {
     data = JSON.parse(text);
   } catch {
@@ -619,35 +621,55 @@ async function createBookerOrderOfficial({
   }
 
   if (!res.ok) {
-    return { success: false, error: `Booker order error ${res.status}: ${text.slice(0, 500)}` };
+    return { success: false, error: `Booker order error ${res.status}: ${String(text).slice(0, 500)}` };
   }
 
-  // Extract booking id/eta (adjust once you see real response from TaxiCaller)
-  const booking_id = data?.id ?? data?.data?.id ?? data?.order_id ?? data?.orderId ?? null;
-  const eta = data?.eta ?? data?.data?.eta ?? null;
+  const orderToken = data?.order_token ?? null;
+  const bookingId = data?.order?.order_id ?? null;
 
+  console.log("[OFFICIAL BOOKER] parsed", {
+    hasOrderToken: Boolean(orderToken),
+    orderTokenPreview: orderToken ? redact(orderToken) : null,
+    bookingId: bookingId ? String(bookingId) : null
+  });
+
+  if (!bookingId) {
+    return {
+      success: false,
+      error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}`
+    };
+  }
+
+  // ETA isn't included in the example; keep default
   return {
     success: true,
-    booking_id: booking_id ? String(booking_id) : null,
-    eta: eta ?? "Soon",
-    raw: data
+    booking_id: String(bookingId),
+    eta: "Soon"
   };
 }
-
 /**
  * =========================
  * PROBES (protected by PROBE_SECRET)
  * =========================
+ * Use these to validate Official JWT + Booker payload without touching production flow.
  */
+
+// Official JWT check (GET)
 app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (req, res) => {
   try {
     const token = await getOfficialTaxiCallerJwt();
-    res.json({ ok: true, hasToken: Boolean(token), expiresAtMs: officialJwtCache.expiresAtMs });
+    res.json({
+      ok: true,
+      hasToken: Boolean(token),
+      tokenPreview: token ? redact(token) : null,
+      expiresAtMs: officialJwtCache.expiresAtMs
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
+// Booker order probe (POST). You provide full payload { order: {...} }.
 app.post("/taxicaller/booker/order-probe", requireProbeSecret, async (req, res) => {
   try {
     requireOfficialEnv();
@@ -680,10 +702,15 @@ app.post("/taxicaller/booker/order-probe", requireProbeSecret, async (req, res) 
 
     const text = await tcRes.text();
 
+    // Redact order_token in response preview/logs
+    const safeTextPreview = String(text || "")
+      .replace(/"order_token"\s*:\s*"([^"]+)"/, (_m, tok) => `"order_token":"${redact(tok)}"`)
+      .slice(0, 800);
+
     console.log("[PROBE booker/order] response", {
       status: tcRes.status,
       ok: tcRes.ok,
-      bodyPreview: text.slice(0, 800),
+      bodyPreview: safeTextPreview,
       xRequestId: tcRes.headers.get("x-request-id"),
       xCorrelationId: tcRes.headers.get("x-correlation-id")
     });
@@ -693,32 +720,48 @@ app.post("/taxicaller/booker/order-probe", requireProbeSecret, async (req, res) 
       parsed = JSON.parse(text);
     } catch {}
 
+    // Also redact token in JSON response if present
+    if (parsed?.order_token) parsed.order_token = redact(parsed.order_token);
+
     return res.status(200).json({
       ok: tcRes.ok,
       status: tcRes.status,
-      responseText: text,
+      responseTextPreview: safeTextPreview,
       responseJson: parsed
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
 /**
  * =========================
  * HEALTH
  * =========================
  */
 app.get("/", (req, res) => res.status(200).send("ok"));
-app.get("/routes-check", (req, res) => res.json({ ok: true, hasCreateBooking: true }));
+app.get("/routes-check", (req, res) =>
+  res.json({
+    ok: true,
+    hasCreateBooking: true,
+    bookingMode: USE_OFFICIAL_BOOKER ? "official" : "legacy"
+  })
+);
 
 /**
  * =========================
  * MAIN ENDPOINT: /create-booking
  * =========================
- * - Accepts either direct JSON or Vapi tool-calls payload
- * - Returns either simple JSON or { results: [{ toolCallId, result }]}
- * - Default: legacy addjob
- * - Feature flag: USE_OFFICIAL_BOOKER=true => official booker/order
+ * Default: legacy addjob.
+ * If USE_OFFICIAL_BOOKER=true: official booker/order.
+ *
+ * Accepts either:
+ * - Direct JSON: { pickup_address, destination_address, customer_phone, notes? }
+ * - Vapi tool-calls payload: body.message.toolCallList[0].function.arguments
+ *
+ * Returns either:
+ * - Simple JSON
+ * - or Vapi format: { results: [{ toolCallId, result }] }
  */
 app.post("/create-booking", async (req, res) => {
   console.log(`BOOKING MODE: ${USE_OFFICIAL_BOOKER ? "official" : "legacy"}`);
@@ -742,7 +785,7 @@ app.post("/create-booking", async (req, res) => {
   };
 
   try {
-    // 1) Parse body
+    // Parse body
     let body = req.body;
     const toolCallId = getToolCallIdIfAny(body);
 
@@ -751,13 +794,12 @@ app.post("/create-booking", async (req, res) => {
       body = s ? JSON.parse(s) : {};
     }
 
-    // 2) Extract Vapi tool args (if present)
+    // Extract Vapi tool args if present
     const vapiArgsRaw = body?.message?.toolCallList?.[0]?.function?.arguments;
     let vapiArgs = {};
     if (typeof vapiArgsRaw === "string") vapiArgs = vapiArgsRaw.trim() ? JSON.parse(vapiArgsRaw) : {};
     else if (vapiArgsRaw && typeof vapiArgsRaw === "object") vapiArgs = vapiArgsRaw;
 
-    // 3) Support both direct + vapi args
     const callerPhone = body.customer_phone ?? vapiArgs.customer_phone ?? "";
     const pickupAddress = body.pickup_address ?? vapiArgs.pickup_address ?? "";
     const dropoffAddress = body.destination_address ?? vapiArgs.destination_address ?? "";
@@ -770,13 +812,12 @@ app.post("/create-booking", async (req, res) => {
       notes
     });
 
-    // 4) Common validation
     if (!pickupAddress || !dropoffAddress) {
       const out = { success: false, error: "Missing pickup_address or destination_address" };
       return toolCallId ? sendVapi(toolCallId, out, 400) : sendSimple(out, 400);
     }
 
-    // 5) OFFICIAL path
+    // OFFICIAL path
     if (USE_OFFICIAL_BOOKER) {
       const result = await createBookerOrderOfficial({
         pickup_address: pickupAddress,
@@ -785,12 +826,11 @@ app.post("/create-booking", async (req, res) => {
         notes
       });
 
-      // Keep response shape stable for Vapi
       const status = result.success ? 200 : 500;
       return toolCallId ? sendVapi(toolCallId, result, status) : sendSimple(result, status);
     }
 
-    // 6) LEGACY path
+    // LEGACY path (default)
     requireEnv("TAXICALLER_BASE_URL");
     requireEnv("GOOGLE_MAPS_API_KEY");
 
@@ -807,9 +847,7 @@ app.post("/create-booking", async (req, res) => {
     console.log("[LEGACY] geocoding dropoff...");
     const to = await geocode(dropoffAddress);
 
-    // Legacy addjob expects dist/edur/route_points
-    // We keep route_points empty here (legacy API usually tolerates it),
-    // but you can swap back to your original directions() if you want route_points.
+    // Keep legacy route_points empty unless you want to restore your legacy route_points logic
     const route = { dist: 0, edur: 0, route_points: [] };
 
     console.log("[LEGACY] sending addjob...");
