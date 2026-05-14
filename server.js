@@ -93,16 +93,21 @@ function isLikelyE164(phone) {
 /**
  * Parse request body exactly once in a route.
  * - If JSON: req.body is already an object.
- * - If text: req.body is a string (possibly with UTF-8 BOM); we JSON.parse it.
+ * - If text: req.body is a string; tolerate BOM/garbage before first "{"
  */
 function parseBodyOnce(req) {
   if (req.body && typeof req.body === "object") return req.body;
 
   const raw = typeof req.body === "string" ? req.body : "";
-  const cleaned = raw.replace(/^\uFEFF/, "").trim(); // remove BOM if present
-  if (!cleaned) return {};
+  if (!raw) return {};
 
-  return JSON.parse(cleaned);
+  // Remove BOM if present, then locate the first JSON object start.
+  const noBom = raw.replace(/^\uFEFF/, "");
+  const i = noBom.indexOf("{");
+  if (i === -1) throw new Error("Body does not contain JSON object");
+
+  const candidate = noBom.slice(i).trim();
+  return JSON.parse(candidate);
 }
 
 function extractVapiToolCall(body) {
