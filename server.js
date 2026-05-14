@@ -560,8 +560,7 @@ async function createBookerOrderOfficial({
   const to = await geocode(destination_address);
 
   console.log("[OFFICIAL] directions...");
- const r = await directions(from, to);
-const route = { dist: r.dist, edur: r.edur, route_points: [] };
+  const r = await directions(from, to);
 
   const jwt = await getOfficialTaxiCallerJwt();
 
@@ -624,6 +623,22 @@ const route = { dist: r.dist, edur: r.edur, route_points: [] };
   if (!res.ok) {
     return { success: false, error: `Booker order error ${res.status}: ${String(text).slice(0, 500)}` };
   }
+
+  const orderToken = data?.order_token ?? null;
+  const bookingId = data?.order?.order_id ?? null;
+
+  console.log("[OFFICIAL BOOKER] parsed", {
+    hasOrderToken: Boolean(orderToken),
+    orderTokenPreview: orderToken ? redact(orderToken) : null,
+    bookingId: bookingId ? String(bookingId) : null
+  });
+
+  if (!bookingId) {
+    return { success: false, error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}` };
+  }
+
+  return { success: true, booking_id: String(bookingId), eta: "Soon" };
+}
 
   const orderToken = data?.order_token ?? null;
   const bookingId = data?.order?.order_id ?? null;
