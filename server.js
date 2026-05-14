@@ -23,7 +23,7 @@ const app = express();
  * BODY PARSING
  * =========================
  * We accept EVERYTHING as text to avoid express.json() crashes.
- * We will JSON.parse manually in parseBodyOnce().
+ * We JSON.parse manually in parseBodyOnce().
  */
 app.use(express.text({ type: "*/*", limit: "2mb" }));
 
@@ -90,11 +90,8 @@ function isLikelyE164(phone) {
   return /^\+\d{7,15}$/.test(String(phone || "").trim());
 }
 
-/**
- * Parse request body exactly once in a route.
- * - With express.text("*/*") it should be a string,
- *   but we also handle Buffer/other types defensively.
- */
+// Parse request body exactly once in a route.
+// With express.text("*/*") it should be a string, but we also handle Buffer/other types defensively.
 function parseBodyOnce(req) {
   // If some middleware already produced an object (rare here), accept it.
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) return req.body;
@@ -108,20 +105,30 @@ function parseBodyOnce(req) {
 
   if (!raw) return {};
 
+  // DIAGNOSTIC: shows what the server actually receives
   console.log("[parseBodyOnce] rawHead", {
     len: raw.length,
-    head: raw.slice(0, 40),
-    codes: Array.from(raw.slice(0, 12)).map((c) => c.charCodeAt(0))
+    head: raw.slice(0, 80),
+    codes: Array.from(raw.slice(0, 24)).map((c) => c.charCodeAt(0))
   });
 
-  const cleanedPrefix = raw
-    .replace(/^\uFEFF/, "")
-    .replace(/^[\u0000-\u001F]+/, "");
+  // Remove BOM + leading control characters (0x00-0x1F)
+  const cleanedPrefix = raw.replace(/^\uFEFF/, "").replace(/^[\u0000-\u001F]+/, "");
 
+  // Find first JSON object start
   const i = cleanedPrefix.indexOf("{");
   if (i === -1) throw new Error("Body does not contain JSON object");
 
-  const candidate = cleanedPrefix.slice(i).trim();
+  let candidate = cleanedPrefix.slice(i).trim();
+
+  // If JSON got wrapped in quotes, unwrap once.
+  if (
+    (candidate.startsWith('"') && candidate.endsWith('"')) ||
+    (candidate.startsWith("'") && candidate.endsWith("'"))
+  ) {
+    candidate = candidate.slice(1, -1);
+  }
+
   return JSON.parse(candidate);
 }
 
