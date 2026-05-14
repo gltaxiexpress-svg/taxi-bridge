@@ -24,6 +24,7 @@ app.use(express.text({ type: "text/*", limit: "2mb" }));
  */
 const USE_OFFICIAL_BOOKER = String(process.env.USE_OFFICIAL_BOOKER || "").toLowerCase() === "true";
 const AUTO_ASSIGN_BOOKER = String(process.env.AUTO_ASSIGN_BOOKER || "").toLowerCase() === "true";
+
 // Legacy DispatchApp base (existing)
 const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // e.g. https://dn1001-rc.taxicaller.net
 const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY
@@ -692,6 +693,7 @@ return {
   assigned,
   eta: "Soon"
 };
+}
 /**
  * =========================
  * PROBES (protected by PROBE_SECRET)
