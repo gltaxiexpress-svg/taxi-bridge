@@ -93,7 +93,7 @@ function isLikelyE164(phone) {
 /**
  * Parse request body exactly once in a route.
  * - If JSON: req.body is already an object.
- * - If text: req.body is a string; tolerate BOM/garbage before first "{"
+ * - If text: req.body is a string; tolerate BOM/garbage/control chars before "{"
  */
 function parseBodyOnce(req) {
   if (req.body && typeof req.body === "object") return req.body;
@@ -101,12 +101,22 @@ function parseBodyOnce(req) {
   const raw = typeof req.body === "string" ? req.body : "";
   if (!raw) return {};
 
-  // Remove BOM if present, then locate the first JSON object start.
-  const noBom = raw.replace(/^\uFEFF/, "");
-  const i = noBom.indexOf("{");
+  // DIAGNOSTIC: shows the first bytes arriving at the server
+  console.log("[parseBodyOnce] rawHead", {
+    len: raw.length,
+    head: raw.slice(0, 40),
+    codes: Array.from(raw.slice(0, 12)).map((c) => c.charCodeAt(0))
+  });
+
+  // Remove BOM + leading control characters (0x00-0x1F) that can break JSON.parse
+  const cleanedPrefix = raw
+    .replace(/^\uFEFF/, "")
+    .replace(/^[\u0000-\u001F]+/, "");
+
+  const i = cleanedPrefix.indexOf("{");
   if (i === -1) throw new Error("Body does not contain JSON object");
 
-  const candidate = noBom.slice(i).trim();
+  const candidate = cleanedPrefix.slice(i).trim();
   return JSON.parse(candidate);
 }
 
