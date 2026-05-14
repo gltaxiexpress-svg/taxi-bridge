@@ -49,6 +49,15 @@ function requireProbeSecret(req, res, next) {
  * =========================
  * We avoid logging sensitive data (phones, tokens, headers).
  */
+function joinUrl(base, path) {
+  return `${String(base || "").replace(/\/+$/, "")}/${String(path || "").replace(/^\/+/, "")}`;
+}
+
+function redact(s) {
+  const str = String(s ?? "");
+  if (str.length <= 12) return "***";
+  return str.slice(0, 6) + "…" + str.slice(-4);
+}
 function maskPhone(s) {
   const str = String(s ?? "");
   // mask digits leaving only last 2 digits visible
@@ -96,15 +105,14 @@ async function generateOfficialTaxiCallerJwt({
   const ttl = clampTtl(ttlSeconds);
 
   const urlsToTry = [
-    `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/jwt/for-key`,
-    `${TAXICALLER_OFFICIAL_API_BASE_URL}/AdminService/v1/jwt/for-key`
-  ];
+  `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/jwt/for-key`,
+  `${TAXICALLER_OFFICIAL_API_BASE_URL}/AdminService/v1/jwt/for-key`
+];
 
-  let lastErrText = null;
-
-  for (const baseUrl of urlsToTry) {
-    const key = String(TAXICALLER_API_KEY || "").trim();
-    const url = `${baseUrl}?` + new URLSearchParams({ key, sub, ttl: String(ttl) }).toString();
+for (const baseUrl of urlsToTry) {
+  const url = `${baseUrl}?` + new URLSearchParams({ key, sub, ttl: String(ttl) }).toString();
+  const res = await fetch(url, { method: "GET" });
+}
 
     const res = await fetch(url, { method: "GET" });
     const text = await res.text();
