@@ -104,18 +104,53 @@ async function generateOfficialTaxiCallerJwt({
 
   const ttl = clampTtl(ttlSeconds);
 
-  const urlsToTry = [
-  `${TAXICALLER_OFFICIAL_API_BASE_URL}/api/v1/jwt/for-key`,
-  `${TAXICALLER_OFFICIAL_API_BASE_URL}/AdminService/v1/jwt/for-key`
-];
+  const endpointPathsToTry = [
+    "/api/v1/jwt/for-key",
+    "/AdminService/v1/jwt/for-key"
+  ];
 
-for (const baseUrl of urlsToTry) {
-  const url = `${baseUrl}?` + new URLSearchParams({ key, sub, ttl: String(ttl) }).toString();
-  const res = await fetch(url, { method: "GET" });
-}
+  let lastErrText = null;
 
-    const res = await fetch(url, { method: "GET" });
+  for (const path of endpointPathsToTry) {
+    const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, path);
+
+    // IMPORTANTE: No loguear la key completa
+    const key = String(TAXICALLER_API_KEY || "").trim();
+
+    // ---- LOG REQUEST (TEMP) ----
+    console.log("[OFFICIAL JWT] request", {
+      method: "POST",
+      endpointPath: path,
+      url,
+      base: TAXICALLER_OFFICIAL_API_BASE_URL,
+      hasApiKey: Boolean(key),
+      apiKeyPreview: redact(key),
+      sub,
+      ttl
+    });
+
+    // AJUSTA el body a lo que diga Johan/documentación.
+    // Yo lo dejo en formato típico: { key, sub, ttl }
+    const body = { key, sub, ttl };
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body)
+    });
+
     const text = await res.text();
+
+    // ---- LOG RESPONSE (TEMP) ----
+    console.log("[OFFICIAL JWT] response", {
+      method: "POST",
+      endpointPath: path,
+      url,
+      status: res.status,
+      ok: res.ok,
+      contentType: res.headers.get("content-type"),
+      bodyPreview: text.slice(0, 300)
+    });
 
     if (!res.ok) {
       lastErrText = `HTTP ${res.status}: ${text}`;
@@ -140,10 +175,8 @@ for (const baseUrl of urlsToTry) {
     officialJwtCache.token = token;
     officialJwtCache.expiresAtMs = now + ttl * 1000;
 
-    console.log("OFFICIAL JWT generated", {
-      hasToken: true,
-      endpoint: baseUrl.replace(TAXICALLER_OFFICIAL_API_BASE_URL, ""),
-      sub,
+    console.log("[OFFICIAL JWT] generated", {
+      endpointPath: path,
       expiresInSeconds: ttl
     });
 
@@ -152,7 +185,6 @@ for (const baseUrl of urlsToTry) {
 
   throw new Error(`Official JWT generation failed. ${lastErrText || "Unknown error"}`);
 }
-
 async function getOfficialTaxiCallerJwt() {
   const now = Date.now();
   const renewAtMs = officialJwtCache.expiresAtMs - OFFICIAL_JWT_RENEW_EARLY_SECONDS * 1000;
