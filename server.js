@@ -23,7 +23,7 @@ app.use(express.text({ type: "text/*", limit: "2mb" }));
  * =========================
  */
 const USE_OFFICIAL_BOOKER = String(process.env.USE_OFFICIAL_BOOKER || "").toLowerCase() === "true";
-
+const AUTO_ASSIGN_BOOKER = String(process.env.AUTO_ASSIGN_BOOKER || "").toLowerCase() === "true";
 // Legacy DispatchApp base (existing)
 const TAXICALLER_BASE_URL = process.env.TAXICALLER_BASE_URL; // e.g. https://dn1001-rc.taxicaller.net
 const TAXICALLER_DSESSION = process.env.TAXICALLER_DSESSION; // VALUE ONLY
@@ -537,7 +537,40 @@ function buildOfficialBookerOrderPayload({ pickup, dropoff, customerPhone, notes
     }
   };
 }
+async function assignBookerOrderOfficial(orderId) {
+  requireOfficialEnv();
 
+  const jwt = await getOfficialTaxiCallerJwt();
+  const id = encodeURIComponent(String(orderId || "").trim());
+
+  const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, `/api/v1/booker/order/${id}/assign`);
+
+  console.log("[OFFICIAL ASSIGN] request", { method: "POST", url });
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${jwt}`
+    }
+  });
+
+  const text = await res.text();
+
+  console.log("[OFFICIAL ASSIGN] response", {
+    status: res.status,
+    ok: res.ok,
+    bodyPreview: String(text || "").slice(0, 500),
+    xRequestId: res.headers.get("x-request-id"),
+    xCorrelationId: res.headers.get("x-correlation-id")
+  });
+
+  if (!res.ok) {
+    return { ok: false, error: `Assign error ${res.status}: ${String(text).slice(0, 500)}` };
+  }
+
+  return { ok: true };
+}
 async function createBookerOrderOfficial({
   pickup_address,
   destination_address,
@@ -546,7 +579,27 @@ async function createBookerOrderOfficial({
 }) {
   requireOfficialEnv();
   requireEnv("GOOGLE_MAPS_API_KEY");
+let assigned = false;
 
+if (AUTO_ASSIGN_BOOKER) {
+  const assignResult = await assignBookerOrderOfficial(bookingId);
+  assigned = Boolean(assignResult?.ok);
+
+  if (!assigned) {
+    console.log("[OFFICIAL ASSIGN] failed (non-fatal)", {
+      bookingId: String(bookingId),
+      error: assignResult?.error || "unknown"
+    });
+  }
+}
+
+return {
+  success: true,
+  booking_id: String(bookingId),
+  job_id: jobId != null ? String(jobId) : null,
+  assigned,
+  eta: "Soon"
+};
   const phone = String(customer_phone || "").trim().toLowerCase();
   const invalidPhones = new Set(["", "e.164", "unknown", "private", "anonymous", "blocked", "unavailable"]);
   if (invalidPhones.has(phone)) {
