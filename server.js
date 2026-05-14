@@ -928,6 +928,23 @@ app.post("/create-booking", async (req, res) => {
 
 /**
  * =========================
+ * ERROR HANDLER (must be after routes)
+ * =========================
+ */
+app.use((err, req, res, next) => {
+  if (err && err.type === "entity.parse.failed") {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_JSON_BODY",
+      message: err.message
+    });
+  }
+
+  console.log("UNHANDLED ERROR:", err);
+  return res.status(500).json({ ok: false, error: "INTERNAL_ERROR" });
+});
+/**
+ * =========================
  * START SERVER
  * =========================
  */
