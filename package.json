@@ -1,13 +1,13 @@
 {
-  "name" "taxi-bridge",
-  "version" "1.0.0",
-  "main" "server.js",
-  "type" "module",
-  "scripts" {
-    "start" "node server.js"
+  "name": "taxi-bridge",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
   },
-  "dependencies" {
-    "express" "^4.19.2",
-    "googleapis" "^144.0.0"
+  "dependencies": {
+    "express": "^4.19.2",
+    "googleapis": "^144.0.0"
   }
 }
