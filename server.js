@@ -16,6 +16,7 @@ import express from "express";
 import { google } from "googleapis"; // <-- STAGING: Google Sheets support (helpers added in Part 2)
 
 console.log("BOOT:", new Date().toISOString());
+console.log("STAGING_BUILD_TAG:", "sheets-debug-v1"); // <-- ADD THIS LINE (staging only)
 
 const app = express();
 
