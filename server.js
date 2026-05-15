@@ -605,11 +605,22 @@ app.post("/create-booking", async (req, res) => {
     notes
   });
 
+  // ---- DEBUG: confirm env + flag ----
+  console.log("[SHEETS][DEBUG]", {
+    ENVIRONMENT: process.env.ENVIRONMENT,
+    ENABLE_GOOGLE_SHEETS_LOG: process.env.ENABLE_GOOGLE_SHEETS_LOG,
+    isStagingEnv: isStagingEnv(),
+    enabledBool: envBool("ENABLE_GOOGLE_SHEETS_LOG", false),
+    resultSuccess: Boolean(result?.success)
+  });
+
   // ---- STAGING ONLY: Google Sheets logging (non-fatal) ----
   try {
     const shouldLogSheets = isStagingEnv() && envBool("ENABLE_GOOGLE_SHEETS_LOG", false);
 
     if (shouldLogSheets && result?.success) {
+      console.log("[SHEETS][DEBUG] will-append", { booking_id: result.booking_id });
+
       const createdAtUtc = new Date().toISOString();
 
       // 12 columns (A-L)
@@ -647,9 +658,6 @@ app.post("/create-booking", async (req, res) => {
       console.log("[SHEETS] appended row to", updatedRange);
     } else if (shouldLogSheets) {
       console.log("[SHEETS] skipped (booking not successful)");
-    } else {
-      // keep quiet or log if you want:
-      // console.log("[SHEETS] skipped (not staging or ENABLE_GOOGLE_SHEETS_LOG!=true)");
     }
   } catch (e) {
     console.error("[SHEETS] append failed (non-fatal):", e?.message || e);
