@@ -227,11 +227,11 @@ async function appendRowToGoogleSheet(valuesRow) {
 
   const sheets = google.sheets({ version: "v4", auth });
 
-  // A:L = 12 columns (matches your header plan)
+    // A:L = 12 columns (matches your header plan)
   // Quote sheet name to handle spaces/special characters.
   // Escape single quotes per A1 notation rules: ' becomes ''
   const safeSheetName = String(sheetName).replace(/'/g, "''");
-  const range = `'${safeSheetName}'!A:L`;
+  const range = `'${safeSheetName}'!A1`;
   console.log("[SHEETS][DEBUG] append range =", range);
 
   const resp = await sheets.spreadsheets.values.append({
