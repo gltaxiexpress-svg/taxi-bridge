@@ -232,6 +232,7 @@ async function appendRowToGoogleSheet(valuesRow) {
   // Escape single quotes per A1 notation rules: ' becomes ''
   const safeSheetName = String(sheetName).replace(/'/g, "''");
   const range = `'${safeSheetName}'!A:L`;
+  console.log("[SHEETS][DEBUG] append range =", range);
 
   const resp = await sheets.spreadsheets.values.append({
     spreadsheetId,
