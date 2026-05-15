@@ -13,6 +13,7 @@
  */
 
 import express from "express";
+import { google } from "googleapis"; // <-- STAGING: Google Sheets support (helpers added in Part 2)
 
 console.log("BOOT:", new Date().toISOString());
 
@@ -161,6 +162,84 @@ function requireProbeSecret(req, res, next) {
 
   return next();
 }
+/**
+ * =========================
+ * GOOGLE SHEETS (STAGING ONLY)
+ * =========================
+ * Controlled by:
+ * - ENVIRONMENT=staging
+ * - ENABLE_GOOGLE_SHEETS_LOG=true
+ *
+ * Required env:
+ * - GOOGLE_SERVICE_ACCOUNT_JSON (FULL JSON)
+ * - GOOGLE_SHEETS_SPREADSHEET_ID
+ * - GOOGLE_SHEETS_SHEET_NAME (optional; default "Bookings")
+ */
+function envBool(name, defaultValue = false) {
+  const v = (process.env[name] || "").trim().toLowerCase();
+  if (!v) return defaultValue;
+  return ["1", "true", "yes", "y", "on"].includes(v);
+}
+
+function isStagingEnv() {
+  return (process.env.ENVIRONMENT || "").trim().toLowerCase() === "staging";
+}
+
+function getServiceAccountFromEnv() {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) return null;
+
+  const trimmed = raw.trim();
+
+  // Normal: paste the full JSON file here.
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // If the JSON was pasted with outer quotes, unwrap once.
+    if (
+      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    ) {
+      return JSON.parse(trimmed.slice(1, -1));
+    }
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
+  }
+}
+
+async function appendRowToGoogleSheet(valuesRow) {
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const sheetName = process.env.GOOGLE_SHEETS_SHEET_NAME || "Bookings";
+  const sa = getServiceAccountFromEnv();
+
+  if (!spreadsheetId) throw new Error("Missing GOOGLE_SHEETS_SPREADSHEET_ID");
+  if (!sa?.client_email) throw new Error("Service account JSON missing client_email");
+  if (!sa?.private_key) throw new Error("Service account JSON missing private_key");
+
+  // Ensure \n sequences become actual newlines (Render often stores it escaped)
+  const privateKey = String(sa.private_key).replace(/\\n/g, "\n");
+
+  const auth = new google.auth.JWT({
+    email: sa.client_email,
+    key: privateKey,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+  });
+
+  const sheets = google.sheets({ version: "v4", auth });
+
+  // A:L = 12 columns (matches your header plan)
+  const range = `${sheetName}!A:L`;
+
+  const resp = await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [valuesRow] }
+  });
+
+  return resp.data?.updates?.updatedRange;
+}
+
 /**
  * =========================
  * GOOGLE MAPS: GEOCODE + DIRECTIONS
@@ -489,7 +568,7 @@ app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) 
 app.post("/create-booking", async (req, res) => {
   let body;
   try {
-    body = parseBodyOnce(req); // <-- asegúrate de actualizar parseBodyOnce en PARTE 1/4
+    body = parseBodyOnce(req);
   } catch (e) {
     return res.status(400).json({
       ok: false,
@@ -506,6 +585,11 @@ app.post("/create-booking", async (req, res) => {
   const customer_phone = String(input?.customer_phone || "").trim();
   const notes = input?.notes != null ? String(input.notes) : "";
 
+  // Optional fields (won't break if missing)
+  const passengers = input?.passengers ?? "";
+  const customer_name = input?.customer_name != null ? String(input.customer_name) : "";
+  const language = input?.language != null ? String(input.language) : "";
+
   console.log("[/create-booking] input", {
     pickup_address,
     destination_address,
@@ -520,6 +604,56 @@ app.post("/create-booking", async (req, res) => {
     customer_phone,
     notes
   });
+
+  // ---- STAGING ONLY: Google Sheets logging (non-fatal) ----
+  try {
+    const shouldLogSheets = isStagingEnv() && envBool("ENABLE_GOOGLE_SHEETS_LOG", false);
+
+    if (shouldLogSheets && result?.success) {
+      const createdAtUtc = new Date().toISOString();
+
+      // 12 columns (A-L)
+      const row = [
+        createdAtUtc,                      // created_at_utc
+        "Sara G5",                         // assistant (staging tests)
+        "staging",                         // environment
+        String(result.booking_id || ""),   // booking_id
+        pickup_address,                    // pickup_address
+        destination_address,               // destination_address
+        customer_name,                     // customer_name
+        customer_phone,                    // customer_phone (full; Sheet is internal)
+        String(passengers),                // passengers
+        notes,                             // notes
+        String(result.eta || ""),          // eta
+        JSON.stringify(
+          {
+            input: {
+              pickup_address,
+              destination_address,
+              customer_name,
+              customer_phone,
+              passengers,
+              notes,
+              language
+            },
+            result
+          },
+          null,
+          0
+        )                                  // raw_response_json
+      ];
+
+      const updatedRange = await appendRowToGoogleSheet(row);
+      console.log("[SHEETS] appended row to", updatedRange);
+    } else if (shouldLogSheets) {
+      console.log("[SHEETS] skipped (booking not successful)");
+    } else {
+      // keep quiet or log if you want:
+      // console.log("[SHEETS] skipped (not staging or ENABLE_GOOGLE_SHEETS_LOG!=true)");
+    }
+  } catch (e) {
+    console.error("[SHEETS] append failed (non-fatal):", e?.message || e);
+  }
 
   const status = result.success ? 200 : 500;
   return sendVapiOrSimple(res, toolCallId, result, status);
