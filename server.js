@@ -1,6 +1,6 @@
 /**
- * server.js (ESM) — Minimal & Stable
- * Goal: Vapi → /create-booking → TaxiCaller Official Booker API
+ * server.js (ESM) — Staging Only — Minimal & Robust
+ * Goal: Vapi → /create-booking → TaxiCaller Official Booker API (RC)
  *
  * Kept:
  * - Express
@@ -10,6 +10,12 @@
  * - Google geocode + directions
  * - Official JWT via GET /api/v1/jwt/for-key
  * - Booker order via POST /api/v1/booker/order
+ * - Optional Google Sheets logging (staging) via ENABLE_GOOGLE_SHEETS_LOG=true
+ *
+ * Rules:
+ * - No duplicate routes
+ * - No crashes on TaxiCaller RC 502/timeout/fetch failed
+ * - Controlled JSON errors; upstream failures => HTTP 503
  */
 
 import express from "express";
@@ -22,8 +28,8 @@ const app = express();
  * =========================
  * BODY PARSING
  * =========================
- * We accept EVERYTHING as text to avoid express.json() crashes.
- * We JSON.parse manually in parseBodyOnce().
+ * Accept everything as text to avoid express.json() crashes.
+ * Parse manually in parseBodyOnce().
  */
 app.use(express.text({ type: "*/*", limit: "2mb" }));
 
@@ -36,6 +42,7 @@ const PROBE_SECRET = String(process.env.PROBE_SECRET || "");
 
 const GOOGLE_MAPS_API_KEY = String(process.env.GOOGLE_MAPS_API_KEY || "");
 
+// TaxiCaller Official API (RC by default for staging)
 const TAXICALLER_OFFICIAL_API_BASE_URL = String(
   process.env.TAXICALLER_OFFICIAL_API_BASE_URL || "https://api-rc.taxicaller.net"
 );
@@ -44,6 +51,9 @@ const TAXICALLER_COMPANY_ID = Number(process.env.TAXICALLER_COMPANY_ID || 0);
 
 const TAXICALLER_OFFICIAL_JWT_SUBJECT = String(process.env.TAXICALLER_OFFICIAL_JWT_SUBJECT || "*");
 const TAXICALLER_OFFICIAL_JWT_TTL_SECONDS = Number(process.env.TAXICALLER_OFFICIAL_JWT_TTL_SECONDS || 900);
+
+const ENABLE_GOOGLE_SHEETS_LOG = String(process.env.ENABLE_GOOGLE_SHEETS_LOG || "").toLowerCase() === "true";
+const GOOGLE_SHEETS_WEBHOOK_URL = String(process.env.GOOGLE_SHEETS_WEBHOOK_URL || ""); // optional webhook endpoint
 
 /**
  * =========================
@@ -90,8 +100,14 @@ function isLikelyE164(phone) {
   return /^\+\d{7,15}$/.test(String(phone || "").trim());
 }
 
-// Parse request body exactly once in a route.
-// With express.text("*/*") it should be a string, but we also handle Buffer/other types defensively.
+function asErrorMessage(e) {
+  return String(e?.message || e || "Unknown error");
+}
+
+/**
+ * Parse request body exactly once in a route.
+ * With express.text("*/*") it should be a string, but we also handle Buffer/other types defensively.
+ */
 function parseBodyOnce(req) {
   // If some middleware already produced an object (rare here), accept it.
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) return req.body;
@@ -161,6 +177,44 @@ function requireProbeSecret(req, res, next) {
 
   return next();
 }
+
+/**
+ * =========================
+ * fetchWithTimeout (stability)
+ * =========================
+ */
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || 20000));
+
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } catch (e) {
+    const msg = asErrorMessage(e);
+    // Normalize abort error message
+    if (msg.toLowerCase().includes("aborted") || msg.toLowerCase().includes("abort")) {
+      throw new Error(`timeout after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function isTaxiCallerUpstreamFailureMessage(message) {
+  const m = String(message || "").toLowerCase();
+  return (
+    m.includes("official jwt error 502") ||
+    m.includes("502 bad gateway") ||
+    m.includes("fetch failed") ||
+    m.includes("connect timeout") ||
+    m.includes("etimedout") ||
+    m.includes("econnreset") ||
+    m.includes("econnrefused") ||
+    m.includes("timeout after")
+  );
+}
 /**
  * =========================
  * GOOGLE MAPS: GEOCODE + DIRECTIONS
@@ -173,7 +227,7 @@ async function geocode(address) {
     "https://maps.googleapis.com/maps/api/geocode/json?" +
     new URLSearchParams({ address, key: GOOGLE_MAPS_API_KEY }).toString();
 
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url, { method: "GET" }, 15000);
   const data = await res.json();
 
   if (data.status !== "OK" || !data.results?.[0]) {
@@ -202,7 +256,7 @@ async function directions(from, to) {
       key: GOOGLE_MAPS_API_KEY
     }).toString();
 
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url, { method: "GET" }, 15000);
   const data = await res.json();
 
   if (data.status !== "OK" || !data.routes?.[0]?.legs?.[0]) {
@@ -257,8 +311,17 @@ async function generateOfficialTaxiCallerJwt({
   const safeQs = new URLSearchParams({ key: redact(key), sub, ttl: String(ttl) }).toString();
   console.log("[OFFICIAL JWT] request", { method: "GET", url: `${base}?${safeQs}` });
 
-  const res = await fetch(url, { method: "GET" });
-  const text = await res.text();
+  let res;
+  let text = "";
+  try {
+    res = await fetchWithTimeout(url, { method: "GET" }, 15000);
+    text = await res.text();
+  } catch (e) {
+    // fetch failed / timeout etc.
+    const message = asErrorMessage(e);
+    console.log("[OFFICIAL JWT] transportError", { message });
+    throw new Error(`Official JWT transport error: ${message}`);
+  }
 
   console.log("[OFFICIAL JWT] response", {
     status: res.status,
@@ -267,7 +330,10 @@ async function generateOfficialTaxiCallerJwt({
     bodyPreview: text.slice(0, 240)
   });
 
-  if (!res.ok) throw new Error(`Official JWT error ${res.status}: ${text.slice(0, 400)}`);
+  if (!res.ok) {
+    // Keep error message concise for callers but still useful
+    throw new Error(`Official JWT error ${res.status}: ${text.slice(0, 400)}`);
+  }
 
   let data;
   try {
@@ -383,6 +449,7 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
   console.log("[OFFICIAL] directions...");
   const r = await directions(from, to);
 
+  // JWT may throw (502/timeout/fetch failed). Caller must catch.
   const jwt = await getOfficialTaxiCallerJwt();
 
   const payload = buildOfficialBookerOrderPayload({
@@ -409,17 +476,28 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
     payloadSnippet: safeJsonSnippet(payload, 1600)
   });
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json",
-      authorization: `Bearer ${jwt}`
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const text = await res.text();
+  let res;
+  let text = "";
+  try {
+    res = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          authorization: `Bearer ${jwt}`
+        },
+        body: JSON.stringify(payload)
+      },
+      25000
+    );
+    text = await res.text();
+  } catch (e) {
+    const message = asErrorMessage(e);
+    console.log("[OFFICIAL BOOKER] transportError", { message });
+    return { success: false, error: `Booker order transport error: ${message}` };
+  }
 
   const safeTextPreview = String(text || "")
     .replace(/"order_token"\s*:\s*"([^"]+)"/, (_m, tok) => `"order_token":"${redact(tok)}"`)
@@ -444,19 +522,60 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
 
   const bookingId = data?.order?.order_id ?? null;
   if (!bookingId) {
-    return { success: false, error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}` };
+    return {
+      success: false,
+      error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}`
+    };
   }
 
   return { success: true, booking_id: String(bookingId), eta: "Soon" };
 }
+
 /**
  * =========================
- * ROUTES
+ * GOOGLE SHEETS LOGGING (optional, staging)
+ * =========================
+ * If ENABLE_GOOGLE_SHEETS_LOG=true and GOOGLE_SHEETS_WEBHOOK_URL is set,
+ * we'll POST a log object. Failures are non-fatal.
+ */
+async function appendGoogleSheetsLog(event) {
+  if (!ENABLE_GOOGLE_SHEETS_LOG) return;
+  if (!GOOGLE_SHEETS_WEBHOOK_URL) {
+    console.log("[SHEETS] ENABLE_GOOGLE_SHEETS_LOG=true but missing GOOGLE_SHEETS_WEBHOOK_URL");
+    return;
+  }
+
+  try {
+    const res = await fetchWithTimeout(
+      GOOGLE_SHEETS_WEBHOOK_URL,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(event)
+      },
+      15000
+    );
+
+    const text = await res.text();
+    if (!res.ok) {
+      console.log("[SHEETS] append failed", { status: res.status, bodyPreview: text.slice(0, 240) });
+      return;
+    }
+
+    console.log("[SHEETS] appended", { status: res.status });
+  } catch (e) {
+    console.log("[SHEETS] non-fatal error", { message: asErrorMessage(e) });
+  }
+}
+/**
+ * =========================
+ * ROUTES (single block only)
  * =========================
  */
 app.get("/routes-check", (_req, res) => {
   return res.status(200).json({
     ok: true,
+    env: "staging",
     routes: ["/routes-check", "/taxicaller/official-jwt-check", "/create-booking"]
   });
 });
@@ -471,15 +590,8 @@ app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) 
       expiresAtMs: officialJwtCache.expiresAtMs
     });
   } catch (e) {
-    const message = String(e?.message || e);
-
-    const isUpstream =
-      message.includes("Official JWT error 502") ||
-      message.includes("502 Bad Gateway") ||
-      message.includes("fetch failed") ||
-      message.toLowerCase().includes("timeout") ||
-      message.toLowerCase().includes("connect");
-
+    const message = asErrorMessage(e);
+    const isUpstream = isTaxiCallerUpstreamFailureMessage(message);
     return res.status(isUpstream ? 503 : 500).json({
       ok: false,
       error: message,
@@ -502,12 +614,12 @@ app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) 
 app.post("/create-booking", async (req, res) => {
   let body;
   try {
-    body = parseBodyOnce(req); // <-- asegúrate de actualizar parseBodyOnce en PARTE 1/4
+    body = parseBodyOnce(req);
   } catch (e) {
     return res.status(400).json({
       ok: false,
       error: "INVALID_JSON_BODY",
-      message: String(e?.message || e)
+      message: asErrorMessage(e)
     });
   }
 
@@ -527,6 +639,8 @@ app.post("/create-booking", async (req, res) => {
     toolCallId: toolCallId || null
   });
 
+  const startedAt = Date.now();
+
   try {
     const result = await createBookerOrderOfficial({
       pickup_address,
@@ -535,38 +649,66 @@ app.post("/create-booking", async (req, res) => {
       notes
     });
 
-    // If createBookerOrderOfficial returns a structured failure, decide status here.
-    // Use 503 for upstream failures so callers know it's dependency outage.
+    const durationMs = Date.now() - startedAt;
+
+    // If createBookerOrderOfficial returns structured failure, classify status.
     if (!result?.success) {
       const msg = String(result?.error || "");
-      const isUpstream =
-        msg.includes("Official JWT error 502") ||
-        msg.includes("502 Bad Gateway") ||
-        msg.includes("fetch failed") ||
-        msg.toLowerCase().includes("timeout");
+      const isUpstream = isTaxiCallerUpstreamFailureMessage(msg);
 
-      const status = isUpstream ? 503 : 500;
-      return sendVapiOrSimple(res, toolCallId, result, status);
+      // Non-fatal logging to Sheets
+      await appendGoogleSheetsLog({
+        ts: new Date().toISOString(),
+        type: "booking_failed",
+        durationMs,
+        pickup_address,
+        destination_address,
+        customer_phone: maskPhone(customer_phone),
+        error: msg,
+        upstream: isUpstream ? "taxicaller-rc" : null
+      });
+
+      return sendVapiOrSimple(res, toolCallId, result, isUpstream ? 503 : 500);
     }
+
+    // Booking success: Sheets log should not break the response
+    await appendGoogleSheetsLog({
+      ts: new Date().toISOString(),
+      type: "booking_success",
+      durationMs,
+      pickup_address,
+      destination_address,
+      customer_phone: maskPhone(customer_phone),
+      booking_id: result.booking_id
+    });
 
     return sendVapiOrSimple(res, toolCallId, result, 200);
   } catch (err) {
-    const message = String(err?.message || err);
-
-    // RC/TX upstream failures: return 503, never crash the process
-    const isUpstream =
-      message.includes("Official JWT error 502") ||
-      message.includes("502 Bad Gateway") ||
-      message.includes("fetch failed") ||
-      message.toLowerCase().includes("timeout");
+    const message = asErrorMessage(err);
+    const isUpstream = isTaxiCallerUpstreamFailureMessage(message);
 
     console.log("[/create-booking] ERROR", { message });
 
-    const result = {
-      success: false,
-      error: message
-    };
+    // Non-fatal Sheets log
+    await appendGoogleSheetsLog({
+      ts: new Date().toISOString(),
+      type: "booking_exception",
+      pickup_address,
+      destination_address,
+      customer_phone: maskPhone(customer_phone),
+      error: message,
+      upstream: isUpstream ? "taxicaller-rc" : null
+    });
 
-    return sendVapiOrSimple(res, toolCallId, result, isUpstream ? 503 : 500);
+    const payload = { success: false, error: message };
+    return sendVapiOrSimple(res, toolCallId, payload, isUpstream ? 503 : 500);
   }
 });
+
+/**
+ * =========================
+ * START SERVER
+ * =========================
+ */
+const PORT = Number(process.env.PORT || 3000);
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
