@@ -306,15 +306,14 @@ async function directions(from, to) {
 
   return { dist, edur, pts };
 }
-
 /**
-
-=========================
-OFFICIAL JWT (GET /api/v1/jwt/for-key)
-=========================
-*/
+ * =========================
+ * OFFICIAL JWT (GET /api/v1/jwt/for-key)
+ * =========================
+ */
 const OFFICIAL_JWT_RENEW_EARLY_SECONDS = 120;
 let officialJwtCache = { token: null, expiresAtMs: 0 };
+
 function clampTtl(ttl) {
   const n = Number(ttl);
   if (!Number.isFinite(n)) return 900;
@@ -381,6 +380,7 @@ async function getOfficialTaxiCallerJwt() {
     sub: TAXICALLER_OFFICIAL_JWT_SUBJECT,
     ttlSeconds: TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
   });
+}
 /**
  * =========================
  * BOOKER PAYLOAD + CREATE ORDER
