@@ -13,10 +13,8 @@
  */
 
 import express from "express";
-import { google } from "googleapis"; // <-- STAGING: Google Sheets support (helpers added in Part 2)
 
 console.log("BOOT:", new Date().toISOString());
-console.log("STAGING_BUILD_TAG:", "sheets-debug-v1"); // <-- ADD THIS LINE (staging only)
 
 const app = express();
 
@@ -164,94 +162,13 @@ function requireProbeSecret(req, res, next) {
   return next();
 }
 /**
-
-=========================
-GOOGLE SHEETS (STAGING ONLY)
-=========================
-Controlled by:
-ENVIRONMENT=staging
-ENABLE_GOOGLE_SHEETS_LOG=true
-Required env:
-GOOGLE_SERVICE_ACCOUNT_JSON (FULL JSON)
-GOOGLE_SHEETS_SPREADSHEET_ID
-GOOGLE_SHEETS_SHEET_NAME (optional; default "Bookings")
-*/
-function envBool(name, defaultValue = false) {
-  const v = (process.env[name] || "").trim().toLowerCase();
-  if (!v) return defaultValue;
-  return ["1", "true", "yes", "y", "on"].includes(v);
-}
-function isStagingEnv() {
-  return (process.env.ENVIRONMENT || "").trim().toLowerCase() === "staging";
-}
-
-function getServiceAccountFromEnv() {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!raw) return null;
-
-  const trimmed = raw.trim();
-
-  // Normal: paste the full JSON file here.
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // If the JSON was pasted with outer quotes, unwrap once.
-    if (
-      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-      (trimmed.startsWith("'") && trimmed.endsWith("'"))
-    ) {
-      return JSON.parse(trimmed.slice(1, -1));
-    }
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
-  }
-}
-
-async function appendRowToGoogleSheet(valuesRow) {
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const sheetName = process.env.GOOGLE_SHEETS_SHEET_NAME || "Bookings";
-  const sa = getServiceAccountFromEnv();
-
-  if (!spreadsheetId) throw new Error("Missing GOOGLE_SHEETS_SPREADSHEET_ID");
-  if (!sa?.client_email) throw new Error("Service account JSON missing client_email");
-  if (!sa?.private_key) throw new Error("Service account JSON missing private_key");
-
-  // Ensure \n sequences become actual newlines (Render often stores it escaped)
-  const privateKey = String(sa.private_key).replace(/\\n/g, "\n");
-
-  const auth = new google.auth.JWT({
-    email: sa.client_email,
-    key: privateKey,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
-  });
-
-  const sheets = google.sheets({ version: "v4", auth });
-
-  // A:L = 12 columns (matches your header plan)
-  // Quote sheet name to handle spaces/special characters.
-  // Escape single quotes per A1 notation rules: ' becomes ''
-  const safeSheetName = String(sheetName).replace(/'/g, "''");
-  const range = `'${safeSheetName}'!A1`;
-  console.log("[SHEETS][DEBUG] append range =", range);
-
-  const resp = await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values: [valuesRow] }
-  });
-
-  return resp.data?.updates?.updatedRange;
-}
-
-/**
-
-=========================
-GOOGLE MAPS: GEOCODE + DIRECTIONS
-=========================
-*/
+ * =========================
+ * GOOGLE MAPS: GEOCODE + DIRECTIONS
+ * =========================
+ */
 async function geocode(address) {
   requireEnv("GOOGLE_MAPS_API_KEY");
+
   const url =
     "https://maps.googleapis.com/maps/api/geocode/json?" +
     new URLSearchParams({ address, key: GOOGLE_MAPS_API_KEY }).toString();
@@ -306,6 +223,7 @@ async function directions(from, to) {
 
   return { dist, edur, pts };
 }
+
 /**
  * =========================
  * OFFICIAL JWT (GET /api/v1/jwt/for-key)
@@ -456,108 +374,81 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
     return { success: false, error: "Missing pickup_address or destination_address" };
   }
 
+  console.log("[OFFICIAL] geocoding pickup...");
+  const from = await geocode(pickupAddress);
+
+  console.log("[OFFICIAL] geocoding dropoff...");
+  const to = await geocode(dropoffAddress);
+
+  console.log("[OFFICIAL] directions...");
+  const r = await directions(from, to);
+
+  const jwt = await getOfficialTaxiCallerJwt();
+
+  const payload = buildOfficialBookerOrderPayload({
+    pickup: from,
+    dropoff: to,
+    customerPhone: phone,
+    notes
+  });
+
+  // Inject route data
+  payload.order.route.meta.dist = r.dist;
+  payload.order.route.meta.est_dur = r.edur;
+
+  payload.order.route.legs[0].meta.dist = r.dist;
+  payload.order.route.legs[0].meta.est_dur = r.edur;
+  payload.order.route.legs[0].pts = r.pts;
+
+  const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, "/api/v1/booker/order");
+
+  console.log("[OFFICIAL BOOKER] request", {
+    method: "POST",
+    url,
+    customer_phone: maskPhone(phone),
+    payloadSnippet: safeJsonSnippet(payload, 1600)
+  });
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+      authorization: `Bearer ${jwt}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await res.text();
+
+  const safeTextPreview = String(text || "")
+    .replace(/"order_token"\s*:\s*"([^"]+)"/, (_m, tok) => `"order_token":"${redact(tok)}"`)
+    .slice(0, 600);
+
+  console.log("[OFFICIAL BOOKER] response", {
+    status: res.status,
+    ok: res.ok,
+    bodyPreview: safeTextPreview
+  });
+
+  let data;
   try {
-    console.log("[OFFICIAL] geocoding pickup...");
-    const from = await geocode(pickupAddress);
-
-    console.log("[OFFICIAL] geocoding dropoff...");
-    const to = await geocode(dropoffAddress);
-
-    console.log("[OFFICIAL] directions...");
-    const r = await directions(from, to);
-
-    // IMPORTANT: if TaxiCaller is down/slow, do NOT crash the server
-    let jwt;
-    try {
-      jwt = await getOfficialTaxiCallerJwt();
-    } catch (e) {
-      console.log("[OFFICIAL] jwt error", { message: String(e?.message || e) });
-      return { success: false, error: `TaxiCaller JWT error: ${String(e?.message || e)}` };
-    }
-
-    const payload = buildOfficialBookerOrderPayload({
-      pickup: from,
-      dropoff: to,
-      customerPhone: phone,
-      notes
-    });
-
-    // Inject route data
-    payload.order.route.meta.dist = r.dist;
-    payload.order.route.meta.est_dur = r.edur;
-
-    payload.order.route.legs[0].meta.dist = r.dist;
-    payload.order.route.legs[0].meta.est_dur = r.edur;
-    payload.order.route.legs[0].pts = r.pts;
-
-    const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, "/api/v1/booker/order");
-
-    console.log("[OFFICIAL BOOKER] request", {
-      method: "POST",
-      url,
-      customer_phone: maskPhone(phone),
-      payloadSnippet: safeJsonSnippet(payload, 1600)
-    });
-
-    let res;
-    let text;
-
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          authorization: `Bearer ${jwt}`
-        },
-        body: JSON.stringify(payload)
-      });
-      text = await res.text();
-    } catch (e) {
-      console.log("[OFFICIAL BOOKER] fetch error", {
-        message: String(e?.message || e),
-        code: e?.cause?.code || e?.code
-      });
-      return { success: false, error: `TaxiCaller booker fetch failed: ${e?.cause?.code || e?.code || e?.message || e}` };
-    }
-
-    const safeTextPreview = String(text || "")
-      .replace(/"order_token"\s*:\s*"([^"]+)"/, (_m, tok) => `"order_token":"${redact(tok)}"`)
-      .slice(0, 600);
-
-    console.log("[OFFICIAL BOOKER] response", {
-      status: res.status,
-      ok: res.ok,
-      bodyPreview: safeTextPreview
-    });
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text };
-    }
-
-    if (!res.ok) {
-      return { success: false, error: `Booker order error ${res.status}: ${safeTextPreview}` };
-    }
-
-    const bookingId = data?.order?.order_id ?? null;
-    if (!bookingId) {
-      return {
-        success: false,
-        error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}`
-      };
-    }
-
-    return { success: true, booking_id: String(bookingId), eta: "Soon" };
-  } catch (e) {
-    // Catch-all so nothing here can crash the server / cause 502s
-    console.log("[OFFICIAL] createBookerOrderOfficial error", { message: String(e?.message || e) });
-    return { success: false, error: String(e?.message || e) };
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
   }
-}
 
+  if (!res.ok) {
+    return { success: false, error: `Booker order error ${res.status}: ${safeTextPreview}` };
+  }
+
+  const bookingId = data?.order?.order_id ?? null;
+  if (!bookingId) {
+    return { success: false, error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}` };
+  }
+
+  return { success: true, booking_id: String(bookingId), eta: "Soon" };
+}
 /**
  * =========================
  * ROUTES
@@ -598,7 +489,7 @@ app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) 
 app.post("/create-booking", async (req, res) => {
   let body;
   try {
-    body = parseBodyOnce(req);
+    body = parseBodyOnce(req); // <-- asegúrate de actualizar parseBodyOnce en PARTE 1/4
   } catch (e) {
     return res.status(400).json({
       ok: false,
@@ -615,11 +506,6 @@ app.post("/create-booking", async (req, res) => {
   const customer_phone = String(input?.customer_phone || "").trim();
   const notes = input?.notes != null ? String(input.notes) : "";
 
-  // Optional fields (won't break if missing)
-  const passengers = input?.passengers ?? "";
-  const customer_name = input?.customer_name != null ? String(input.customer_name) : "";
-  const language = input?.language != null ? String(input.language) : "";
-
   console.log("[/create-booking] input", {
     pickup_address,
     destination_address,
@@ -634,64 +520,6 @@ app.post("/create-booking", async (req, res) => {
     customer_phone,
     notes
   });
-
-  // ---- DEBUG: confirm env + flag ----
-  console.log("[SHEETS][DEBUG]", {
-    ENVIRONMENT: process.env.ENVIRONMENT,
-    ENABLE_GOOGLE_SHEETS_LOG: process.env.ENABLE_GOOGLE_SHEETS_LOG,
-    isStagingEnv: isStagingEnv(),
-    enabledBool: envBool("ENABLE_GOOGLE_SHEETS_LOG", false),
-    resultSuccess: Boolean(result?.success)
-  });
-
-  // ---- STAGING ONLY: Google Sheets logging (non-fatal) ----
-  try {
-    const shouldLogSheets = isStagingEnv() && envBool("ENABLE_GOOGLE_SHEETS_LOG", false);
-
-    if (shouldLogSheets && result?.success) {
-      console.log("[SHEETS][DEBUG] will-append", { booking_id: result.booking_id });
-
-      const createdAtUtc = new Date().toISOString();
-
-      // 12 columns (A-L)
-      const row = [
-        createdAtUtc,                      // created_at_utc
-        "Sara G5",                         // assistant (staging tests)
-        "staging",                         // environment
-        String(result.booking_id || ""),   // booking_id
-        pickup_address,                    // pickup_address
-        destination_address,               // destination_address
-        customer_name,                     // customer_name
-        customer_phone,                    // customer_phone (full; Sheet is internal)
-        String(passengers),                // passengers
-        notes,                             // notes
-        String(result.eta || ""),          // eta
-        JSON.stringify(
-          {
-            input: {
-              pickup_address,
-              destination_address,
-              customer_name,
-              customer_phone,
-              passengers,
-              notes,
-              language
-            },
-            result
-          },
-          null,
-          0
-        )                                  // raw_response_json
-      ];
-
-      const updatedRange = await appendRowToGoogleSheet(row);
-      console.log("[SHEETS] appended row to", updatedRange);
-    } else if (shouldLogSheets) {
-      console.log("[SHEETS] skipped (booking not successful)");
-    }
-  } catch (e) {
-    console.error("[SHEETS] append failed (non-fatal):", e?.message || e);
-  }
 
   const status = result.success ? 200 : 500;
   return sendVapiOrSimple(res, toolCallId, result, status);
