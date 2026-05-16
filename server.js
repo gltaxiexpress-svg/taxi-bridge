@@ -1,13 +1,12 @@
 /**
- * server.js (ESM) — STAGING ONLY — Minimal & Robust
- * Goal: Vapi → /create-booking → TaxiCaller Official Booker API (RC)
- *
- * Requirements:
- * - No duplicate routes
- * - No crashes on TaxiCaller RC 502 / timeout / fetch failed
- * - Controlled JSON errors; upstream failures => HTTP 503
- * - Keep Vapi tool-calls compatible
- * - Works with: node server.js
+ // server.js (ESM) — STAGING ONLY — Minimal & Robust
+// Goal: Vapi → /create-booking → TaxiCaller Official Booker API (RC)
+// Requirements:
+// - No duplicate routes
+// - No crashes on TaxiCaller RC 502 / timeout / fetch failed
+// - Controlled JSON errors; upstream failures => HTTP 503
+// - Keep Vapi tool-calls compatible
+// - Works with: node server.js
  */
 
 import express from "express";
@@ -92,11 +91,8 @@ function isLikelyE164(phone) {
 function asErrorMessage(e) {
   return String(e?.message || e || "Unknown error");
 }
-
-/**
- * Parse request body exactly once in a route.
- * We use express.text({ type: "*/*" }) so req.body is usually a string.
- */
+// Parse request body exactly once in a route.
+// We use express.text so req.body is usually a string and we JSON.parse manually.
 function parseBodyOnce(req) {
   // If some middleware already produced an object (rare here), accept it.
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) return req.body;
