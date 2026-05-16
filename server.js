@@ -458,81 +458,108 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
     return { success: false, error: "Missing pickup_address or destination_address" };
   }
 
-  console.log("[OFFICIAL] geocoding pickup...");
-  const from = await geocode(pickupAddress);
-
-  console.log("[OFFICIAL] geocoding dropoff...");
-  const to = await geocode(dropoffAddress);
-
-  console.log("[OFFICIAL] directions...");
-  const r = await directions(from, to);
-
-  const jwt = await getOfficialTaxiCallerJwt();
-
-  const payload = buildOfficialBookerOrderPayload({
-    pickup: from,
-    dropoff: to,
-    customerPhone: phone,
-    notes
-  });
-
-  // Inject route data
-  payload.order.route.meta.dist = r.dist;
-  payload.order.route.meta.est_dur = r.edur;
-
-  payload.order.route.legs[0].meta.dist = r.dist;
-  payload.order.route.legs[0].meta.est_dur = r.edur;
-  payload.order.route.legs[0].pts = r.pts;
-
-  const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, "/api/v1/booker/order");
-
-  console.log("[OFFICIAL BOOKER] request", {
-    method: "POST",
-    url,
-    customer_phone: maskPhone(phone),
-    payloadSnippet: safeJsonSnippet(payload, 1600)
-  });
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json",
-      authorization: `Bearer ${jwt}`
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const text = await res.text();
-
-  const safeTextPreview = String(text || "")
-    .replace(/"order_token"\s*:\s*"([^"]+)"/, (_m, tok) => `"order_token":"${redact(tok)}"`)
-    .slice(0, 600);
-
-  console.log("[OFFICIAL BOOKER] response", {
-    status: res.status,
-    ok: res.ok,
-    bodyPreview: safeTextPreview
-  });
-
-  let data;
   try {
-    data = JSON.parse(text);
-  } catch {
-    data = { raw: text };
-  }
+    console.log("[OFFICIAL] geocoding pickup...");
+    const from = await geocode(pickupAddress);
 
-  if (!res.ok) {
-    return { success: false, error: `Booker order error ${res.status}: ${safeTextPreview}` };
-  }
+    console.log("[OFFICIAL] geocoding dropoff...");
+    const to = await geocode(dropoffAddress);
 
-  const bookingId = data?.order?.order_id ?? null;
-  if (!bookingId) {
-    return { success: false, error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}` };
-  }
+    console.log("[OFFICIAL] directions...");
+    const r = await directions(from, to);
 
-  return { success: true, booking_id: String(bookingId), eta: "Soon" };
+    // IMPORTANT: if TaxiCaller is down/slow, do NOT crash the server
+    let jwt;
+    try {
+      jwt = await getOfficialTaxiCallerJwt();
+    } catch (e) {
+      console.log("[OFFICIAL] jwt error", { message: String(e?.message || e) });
+      return { success: false, error: `TaxiCaller JWT error: ${String(e?.message || e)}` };
+    }
+
+    const payload = buildOfficialBookerOrderPayload({
+      pickup: from,
+      dropoff: to,
+      customerPhone: phone,
+      notes
+    });
+
+    // Inject route data
+    payload.order.route.meta.dist = r.dist;
+    payload.order.route.meta.est_dur = r.edur;
+
+    payload.order.route.legs[0].meta.dist = r.dist;
+    payload.order.route.legs[0].meta.est_dur = r.edur;
+    payload.order.route.legs[0].pts = r.pts;
+
+    const url = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, "/api/v1/booker/order");
+
+    console.log("[OFFICIAL BOOKER] request", {
+      method: "POST",
+      url,
+      customer_phone: maskPhone(phone),
+      payloadSnippet: safeJsonSnippet(payload, 1600)
+    });
+
+    let res;
+    let text;
+
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          authorization: `Bearer ${jwt}`
+        },
+        body: JSON.stringify(payload)
+      });
+      text = await res.text();
+    } catch (e) {
+      console.log("[OFFICIAL BOOKER] fetch error", {
+        message: String(e?.message || e),
+        code: e?.cause?.code || e?.code
+      });
+      return { success: false, error: `TaxiCaller booker fetch failed: ${e?.cause?.code || e?.code || e?.message || e}` };
+    }
+
+    const safeTextPreview = String(text || "")
+      .replace(/"order_token"\s*:\s*"([^"]+)"/, (_m, tok) => `"order_token":"${redact(tok)}"`)
+      .slice(0, 600);
+
+    console.log("[OFFICIAL BOOKER] response", {
+      status: res.status,
+      ok: res.ok,
+      bodyPreview: safeTextPreview
+    });
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+
+    if (!res.ok) {
+      return { success: false, error: `Booker order error ${res.status}: ${safeTextPreview}` };
+    }
+
+    const bookingId = data?.order?.order_id ?? null;
+    if (!bookingId) {
+      return {
+        success: false,
+        error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}`
+      };
+    }
+
+    return { success: true, booking_id: String(bookingId), eta: "Soon" };
+  } catch (e) {
+    // Catch-all so nothing here can crash the server / cause 502s
+    console.log("[OFFICIAL] createBookerOrderOfficial error", { message: String(e?.message || e) });
+    return { success: false, error: String(e?.message || e) };
+  }
 }
+
 /**
  * =========================
  * ROUTES
