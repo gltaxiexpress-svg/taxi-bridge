@@ -471,7 +471,20 @@ app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) 
       expiresAtMs: officialJwtCache.expiresAtMs
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    const message = String(e?.message || e);
+
+    const isUpstream =
+      message.includes("Official JWT error 502") ||
+      message.includes("502 Bad Gateway") ||
+      message.includes("fetch failed") ||
+      message.toLowerCase().includes("timeout") ||
+      message.toLowerCase().includes("connect");
+
+    return res.status(isUpstream ? 503 : 500).json({
+      ok: false,
+      error: message,
+      upstream: isUpstream ? "taxicaller-rc" : null
+    });
   }
 });
 
