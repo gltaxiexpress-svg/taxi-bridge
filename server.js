@@ -106,7 +106,7 @@ function asErrorMessage(e) {
 
 /**
  * Parse request body exactly once in a route.
- * With express.text("*/*") it should be a string, but we also handle Buffer/other types defensively.
+ * We use express.text({ type: "*/*" }) so req.body is usually a string.
  */
 function parseBodyOnce(req) {
   // If some middleware already produced an object (rare here), accept it.
