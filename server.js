@@ -177,72 +177,71 @@ GOOGLE_SHEETS_SPREADSHEET_ID
 GOOGLE_SHEETS_SHEET_NAME (optional; default "Bookings")
 */
 function envBool(name, defaultValue = false) {
-const v = (process.env[name] || "").trim().toLowerCase();
-if (!v) return defaultValue;
-return ["1", "true", "yes", "y", "on"].includes(v);
+  const v = (process.env[name] || "").trim().toLowerCase();
+  if (!v) return defaultValue;
+  return ["1", "true", "yes", "y", "on"].includes(v);
 }
 function isStagingEnv() {
-return (process.env.ENVIRONMENT || "").trim().toLowerCase() === "staging";
+  return (process.env.ENVIRONMENT || "").trim().toLowerCase() === "staging";
 }
 
 function getServiceAccountFromEnv() {
-const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-if (!raw) return null;
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) return null;
 
-const trimmed = raw.trim();
+  const trimmed = raw.trim();
 
-// Normal: paste the full JSON file here.
-try {
-return JSON.parse(trimmed);
-} catch {
-// If the JSON was pasted with outer quotes, unwrap once.
-if (
-(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-(trimmed.startsWith("'") && trimmed.endsWith("'"))
-) {
-return JSON.parse(trimmed.slice(1, -1));
-}
-throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
-}
+  // Normal: paste the full JSON file here.
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // If the JSON was pasted with outer quotes, unwrap once.
+    if (
+      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    ) {
+      return JSON.parse(trimmed.slice(1, -1));
+    }
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
+  }
 }
 
 async function appendRowToGoogleSheet(valuesRow) {
-const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-const sheetName = process.env.GOOGLE_SHEETS_SHEET_NAME || "Bookings";
-const sa = getServiceAccountFromEnv();
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const sheetName = process.env.GOOGLE_SHEETS_SHEET_NAME || "Bookings";
+  const sa = getServiceAccountFromEnv();
 
-if (!spreadsheetId) throw new Error("Missing GOOGLE_SHEETS_SPREADSHEET_ID");
-if (!sa?.client_email) throw new Error("Service account JSON missing client_email");
-if (!sa?.private_key) throw new Error("Service account JSON missing private_key");
+  if (!spreadsheetId) throw new Error("Missing GOOGLE_SHEETS_SPREADSHEET_ID");
+  if (!sa?.client_email) throw new Error("Service account JSON missing client_email");
+  if (!sa?.private_key) throw new Error("Service account JSON missing private_key");
 
-// Ensure \n sequences become actual newlines (Render often stores it escaped)
-const privateKey = String(sa.private_key).replace(/\n/g, "\n");
+  // Ensure \n sequences become actual newlines (Render often stores it escaped)
+  const privateKey = String(sa.private_key).replace(/\\n/g, "\n");
 
-const auth = new google.auth.JWT({
-email: sa.client_email,
-key: privateKey,
-scopes: ["https://www.googleapis.com/auth/spreadsheets"]
-});
+  const auth = new google.auth.JWT({
+    email: sa.client_email,
+    key: privateKey,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+  });
 
-const sheets = google.sheets({ version: "v4", auth });
+  const sheets = google.sheets({ version: "v4", auth });
 
-Copy
-// A:L = 12 columns (matches your header plan)
-// Quote sheet name to handle spaces/special characters.
-// Escape single quotes per A1 notation rules: ' becomes ''
-const safeSheetName = String(sheetName).replace(/'/g, "''");
-const range = '${safeSheetName}'!A1;
-console.log("[SHEETS][DEBUG] append range =", range);
+  // A:L = 12 columns (matches your header plan)
+  // Quote sheet name to handle spaces/special characters.
+  // Escape single quotes per A1 notation rules: ' becomes ''
+  const safeSheetName = String(sheetName).replace(/'/g, "''");
+  const range = `'${safeSheetName}'!A1`;
+  console.log("[SHEETS][DEBUG] append range =", range);
 
-const resp = await sheets.spreadsheets.values.append({
-spreadsheetId,
-range,
-valueInputOption: "RAW",
-insertDataOption: "INSERT_ROWS",
-requestBody: { values: [valuesRow] }
-});
+  const resp = await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [valuesRow] }
+  });
 
-return resp.data?.updates?.updatedRange;
+  return resp.data?.updates?.updatedRange;
 }
 
 /**
@@ -252,60 +251,60 @@ GOOGLE MAPS: GEOCODE + DIRECTIONS
 =========================
 */
 async function geocode(address) {
-requireEnv("GOOGLE_MAPS_API_KEY");
-const url =
-"https://maps.googleapis.com/maps/api/geocode/json?" +
-new URLSearchParams({ address, key: GOOGLE_MAPS_API_KEY }).toString();
+  requireEnv("GOOGLE_MAPS_API_KEY");
+  const url =
+    "https://maps.googleapis.com/maps/api/geocode/json?" +
+    new URLSearchParams({ address, key: GOOGLE_MAPS_API_KEY }).toString();
 
-const res = await fetch(url);
-const data = await res.json();
+  const res = await fetch(url);
+  const data = await res.json();
 
-if (data.status !== "OK" || !data.results?.[0]) {
-throw new Error(Geocode failed for "${address}": ${data.status});
-}
+  if (data.status !== "OK" || !data.results?.[0]) {
+    throw new Error(`Geocode failed for "${address}": ${data.status}`);
+  }
 
-const loc = data.results[0].geometry.location;
-const formatted = data.results[0].formatted_address;
+  const loc = data.results[0].geometry.location;
+  const formatted = data.results[0].formatted_address;
 
-return { lat: loc.lat, lon: loc.lng, text: formatted };
+  return { lat: loc.lat, lon: loc.lng, text: formatted };
 }
 
 // TaxiCaller wants [lonE6, latE6] where lon/lat are multiplied by 1e6 and rounded
 function toE6([lon, lat]) {
-return [Math.round(lon * 1e6), Math.round(lat * 1e6)];
+  return [Math.round(lon * 1e6), Math.round(lat * 1e6)];
 }
 
 async function directions(from, to) {
-requireEnv("GOOGLE_MAPS_API_KEY");
+  requireEnv("GOOGLE_MAPS_API_KEY");
 
-const url =
-"https://maps.googleapis.com/maps/api/directions/json?" +
-new URLSearchParams({
-origin: ${from.lat},${from.lon},
-destination: ${to.lat},${to.lon},
-key: GOOGLE_MAPS_API_KEY
-}).toString();
+  const url =
+    "https://maps.googleapis.com/maps/api/directions/json?" +
+    new URLSearchParams({
+      origin: `${from.lat},${from.lon}`,
+      destination: `${to.lat},${to.lon}`,
+      key: GOOGLE_MAPS_API_KEY
+    }).toString();
 
-const res = await fetch(url);
-const data = await res.json();
+  const res = await fetch(url);
+  const data = await res.json();
 
-if (data.status !== "OK" || !data.routes?.[0]?.legs?.[0]) {
-throw new Error(Directions failed: ${data.status});
-}
+  if (data.status !== "OK" || !data.routes?.[0]?.legs?.[0]) {
+    throw new Error(`Directions failed: ${data.status}`);
+  }
 
-const leg = data.routes[0].legs[0];
+  const leg = data.routes[0].legs[0];
 
-const dist = leg.distance.value; // meters
-const edur = leg.duration.value; // seconds
+  const dist = leg.distance.value; // meters
+  const edur = leg.duration.value; // seconds
 
-// Flattened E6 points: [lonE6, latE6, lonE6, latE6, ...]
-const pts = [];
-for (const step of leg.steps || []) {
-pts.push(...toE6([step.start_location.lng, step.start_location.lat]));
-}
-pts.push(...toE6([leg.end_location.lng, leg.end_location.lat]));
+  // Flattened E6 points: [lonE6, latE6, lonE6, latE6, ...]
+  const pts = [];
+  for (const step of leg.steps || []) {
+    pts.push(...toE6([step.start_location.lng, step.start_location.lat]));
+  }
+  pts.push(...toE6([leg.end_location.lng, leg.end_location.lat]));
 
-return { dist, edur, pts };
+  return { dist, edur, pts };
 }
 
 /**
@@ -317,72 +316,71 @@ OFFICIAL JWT (GET /api/v1/jwt/for-key)
 const OFFICIAL_JWT_RENEW_EARLY_SECONDS = 120;
 let officialJwtCache = { token: null, expiresAtMs: 0 };
 function clampTtl(ttl) {
-const n = Number(ttl);
-if (!Number.isFinite(n)) return 900;
-return Math.max(60, Math.min(900, n));
+  const n = Number(ttl);
+  if (!Number.isFinite(n)) return 900;
+  return Math.max(60, Math.min(900, n));
 }
 
 async function generateOfficialTaxiCallerJwt({
-sub = TAXICALLER_OFFICIAL_JWT_SUBJECT,
-ttlSeconds = TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
+  sub = TAXICALLER_OFFICIAL_JWT_SUBJECT,
+  ttlSeconds = TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
 } = {}) {
-requireOfficialEnv();
+  requireOfficialEnv();
 
-const ttl = clampTtl(ttlSeconds);
-const key = String(TAXICALLER_API_KEY || "").trim();
+  const ttl = clampTtl(ttlSeconds);
+  const key = String(TAXICALLER_API_KEY || "").trim();
 
-const base = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, "/api/v1/jwt/for-key");
+  const base = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, "/api/v1/jwt/for-key");
 
-// Real URL contains real key — DO NOT log.
-const qs = new URLSearchParams({ key, sub, ttl: String(ttl) }).toString();
-const url = ${base}?${qs};
+  // Real URL contains real key — DO NOT log.
+  const qs = new URLSearchParams({ key, sub, ttl: String(ttl) }).toString();
+  const url = `${base}?${qs}`;
 
-// Safe log
-const safeQs = new URLSearchParams({ key: redact(key), sub, ttl: String(ttl) }).toString();
-console.log("[OFFICIAL JWT] request", { method: "GET", url: ${base}?${safeQs} });
+  // Safe log
+  const safeQs = new URLSearchParams({ key: redact(key), sub, ttl: String(ttl) }).toString();
+  console.log("[OFFICIAL JWT] request", { method: "GET", url: `${base}?${safeQs}` });
 
-const res = await fetch(url, { method: "GET" });
-const text = await res.text();
+  const res = await fetch(url, { method: "GET" });
+  const text = await res.text();
 
-console.log("[OFFICIAL JWT] response", {
-status: res.status,
-ok: res.ok,
-contentType: res.headers.get("content-type"),
-bodyPreview: text.slice(0, 240)
-});
+  console.log("[OFFICIAL JWT] response", {
+    status: res.status,
+    ok: res.ok,
+    contentType: res.headers.get("content-type"),
+    bodyPreview: text.slice(0, 240)
+  });
 
-if (!res.ok) throw new Error(Official JWT error ${res.status}: ${text.slice(0, 400)});
+  if (!res.ok) throw new Error(`Official JWT error ${res.status}: ${text.slice(0, 400)}`);
 
-let data;
-try {
-data = JSON.parse(text);
-} catch {
-data = { raw: text };
-}
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
 
-const token = data?.token ?? null;
-if (!token || typeof token !== "string") {
-throw new Error(Official JWT missing token. Response preview: ${safeJsonSnippet(data, 400)});
-}
+  const token = data?.token ?? null;
+  if (!token || typeof token !== "string") {
+    throw new Error(`Official JWT missing token. Response preview: ${safeJsonSnippet(data, 400)}`);
+  }
 
-officialJwtCache.token = token;
-officialJwtCache.expiresAtMs = Date.now() + ttl * 1000;
+  officialJwtCache.token = token;
+  officialJwtCache.expiresAtMs = Date.now() + ttl * 1000;
 
-console.log("[OFFICIAL JWT] generated", { expiresInSeconds: ttl });
-return token;
+  console.log("[OFFICIAL JWT] generated", { expiresInSeconds: ttl });
+  return token;
 }
 
 async function getOfficialTaxiCallerJwt() {
-const now = Date.now();
-const renewAtMs = officialJwtCache.expiresAtMs - OFFICIAL_JWT_RENEW_EARLY_SECONDS * 1000;
+  const now = Date.now();
+  const renewAtMs = officialJwtCache.expiresAtMs - OFFICIAL_JWT_RENEW_EARLY_SECONDS * 1000;
 
-if (officialJwtCache.token && now < renewAtMs) return officialJwtCache.token;
+  if (officialJwtCache.token && now < renewAtMs) return officialJwtCache.token;
 
-return await generateOfficialTaxiCallerJwt({
-sub: TAXICALLER_OFFICIAL_JWT_SUBJECT,
-ttlSeconds: TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
-});
-}
+  return await generateOfficialTaxiCallerJwt({
+    sub: TAXICALLER_OFFICIAL_JWT_SUBJECT,
+    ttlSeconds: TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
+  });
 /**
  * =========================
  * BOOKER PAYLOAD + CREATE ORDER
