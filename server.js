@@ -216,10 +216,25 @@ function requireProbeSecret(req, res, next) {
 
   return next();
 }
-
 // =========================
 // fetchWithTimeout (stability)
 // =========================
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), Number(timeoutMs) || 20000);
+
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    const msg = asErrorMessage(e);
+    if (msg.toLowerCase().includes("aborted")) {
+      throw new Error(`fetch timeout after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(id);
+  }
+}
 
 // =========================
 // GOOGLE SHEETS (Manual Review Logging) — STAGING ONLY
@@ -388,261 +403,3 @@ async function appendBookingRowToSheets(row) {
     });
   }
 }
-// =========================
-// /create-booking
-// =========================
-// Accepts:
-// - Direct JSON: { pickup_address, destination_address, customer_phone, notes? }
-// - Vapi tool-calls payload: body.message.toolCallList[0].function.arguments
-//
-// Returns:
-// - Vapi wrapper when toolCallId exists: { results: [{ toolCallId, result: ... }] }
-app.post("/create-booking", async (req, res) => {
-  let body;
-  try {
-    body = parseBodyOnce(req);
-  } catch (e) {
-    return res.status(400).json({
-      ok: false,
-      error: "INVALID_JSON_BODY",
-      message: asErrorMessage(e)
-    });
-  }
-
-  const { toolCallId, args } = extractVapiToolCall(body);
-  const input = toolCallId ? args : body;
-
-  const pickup_address = String(input?.pickup_address || "").trim();
-  const destination_address = String(input?.destination_address || "").trim();
-  const customer_phone = String(input?.customer_phone || "").trim();
-  const notes = input?.notes != null ? String(input.notes) : "";
-
-  // Manual Review logging fields
-  const created_at = new Date().toISOString();
-  const source = "vapi";
-  const appointment_time = String(input?.appointment_time || "").trim(); // optional (blank ok)
-
-  console.log("[/create-booking] input", {
-    pickup_address,
-    destination_address,
-    customer_phone: maskPhone(customer_phone),
-    notesLen: notes.length,
-    toolCallId: toolCallId || null
-  });
-
-  try {
-    const result = await createBookerOrderOfficial({
-      pickup_address,
-      destination_address,
-      customer_phone,
-      notes
-    });
-
-    // Structured failure (no throw), sanitize what we return to client
-    if (!result?.success) {
-      const rawMessage = String(result?.error || "");
-      const isUpstream = isTaxiCallerUpstreamFailureMessage(rawMessage);
-
-      // Full detail only in logs
-      console.log("[/create-booking] FAIL", { rawMessage });
-
-      const clientPayload = {
-        success: false,
-        error: sanitizeClientError(rawMessage)
-      };
-
-      // Google Sheets (non-fatal, fire-and-forget)
-      appendBookingRowToSheets({
-        created_at,
-        customer_phone,
-        pickup_address,
-        destination_address,
-        appointment_time,
-        notes,
-        taxicaller_success: false,
-        booking_id: "",
-        manual_needed: true,
-        error: sanitizeClientError(rawMessage),
-        source
-      });
-
-      return sendVapiOrSimple(
-        res,
-        toolCallId,
-        clientPayload,
-        isUpstream ? 503 : 500
-      );
-    }
-
-    // Google Sheets (non-fatal, fire-and-forget)
-    appendBookingRowToSheets({
-      created_at,
-      customer_phone,
-      pickup_address,
-      destination_address,
-      appointment_time,
-      notes,
-      taxicaller_success: true,
-      booking_id: result?.booking_id || "",
-      manual_needed: false,
-      error: "",
-      source
-    });
-
-    // Success
-    return sendVapiOrSimple(res, toolCallId, result, 200);
-  } catch (err) {
-    const rawMessage = asErrorMessage(err);
-    const isUpstream = isTaxiCallerUpstreamFailureMessage(rawMessage);
-
-    // Full detail only in logs
-    console.log("[/create-booking] ERROR", { rawMessage });
-
-    const clientPayload = {
-      success: false,
-      error: sanitizeClientError(rawMessage)
-    };
-
-    // Google Sheets (non-fatal, fire-and-forget)
-    appendBookingRowToSheets({
-      created_at,
-      customer_phone,
-      pickup_address,
-      destination_address,
-      appointment_time,
-      notes,
-      taxicaller_success: false,
-      booking_id: "",
-      manual_needed: true,
-      error: sanitizeClientError(rawMessage),
-      source
-    });
-
-    return sendVapiOrSimple(
-      res,
-      toolCallId,
-      clientPayload,
-      isUpstream ? 503 : 500
-    );
-  }
-});
-// =========================
-// ROUTES (single block only)
-// =========================
-
-app.get("/routes-check", (_req, res) => {
-  return res.status(200).json({
-    ok: true,
-    env: "staging",
-    routes: ["/routes-check", "/taxicaller/official-jwt-check", "/create-booking"]
-  });
-});
-
-app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) => {
-  try {
-    const token = await getOfficialTaxiCallerJwt();
-    return res.status(200).json({
-      ok: true,
-      hasToken: Boolean(token),
-      tokenPreview: token ? redact(token) : null,
-      expiresAtMs: officialJwtCache.expiresAtMs
-    });
-  } catch (e) {
-    const rawMessage = asErrorMessage(e);
-    const isUpstream = isTaxiCallerUpstreamFailureMessage(rawMessage);
-
-    // Full detail only in logs
-    console.log("[/taxicaller/official-jwt-check] ERROR", { rawMessage });
-
-    return res.status(isUpstream ? 503 : 500).json({
-      ok: false,
-      error: sanitizeClientError(rawMessage),
-      upstream: isUpstream ? "taxicaller-rc" : null
-    });
-  }
-});
-
-// =========================
-// /create-booking
-// =========================
-// Accepts:
-// - Direct JSON: { pickup_address, destination_address, customer_phone, notes? }
-// - Vapi tool-calls payload: body.message.toolCallList[0].function.arguments
-//
-// Returns:
-// - Vapi wrapper when toolCallId exists: { results: [{ toolCallId, result: ... }] }
-app.post("/create-booking", async (req, res) => {
-  let body;
-  try {
-    body = parseBodyOnce(req);
-  } catch (e) {
-    return res.status(400).json({
-      ok: false,
-      error: "INVALID_JSON_BODY",
-      message: asErrorMessage(e)
-    });
-  }
-
-  const { toolCallId, args } = extractVapiToolCall(body);
-  const input = toolCallId ? args : body;
-
-  const pickup_address = String(input?.pickup_address || "").trim();
-  const destination_address = String(input?.destination_address || "").trim();
-  const customer_phone = String(input?.customer_phone || "").trim();
-  const notes = input?.notes != null ? String(input.notes) : "";
-
-  console.log("[/create-booking] input", {
-    pickup_address,
-    destination_address,
-    customer_phone: maskPhone(customer_phone),
-    notesLen: notes.length,
-    toolCallId: toolCallId || null
-  });
-
-  try {
-    const result = await createBookerOrderOfficial({
-      pickup_address,
-      destination_address,
-      customer_phone,
-      notes
-    });
-
-    // Structured failure (no throw), sanitize what we return to client
-    if (!result?.success) {
-      const rawMessage = String(result?.error || "");
-      const isUpstream = isTaxiCallerUpstreamFailureMessage(rawMessage);
-
-      // Full detail only in logs
-      console.log("[/create-booking] FAIL", { rawMessage });
-
-      const clientPayload = {
-        success: false,
-        error: sanitizeClientError(rawMessage)
-      };
-
-      return sendVapiOrSimple(res, toolCallId, clientPayload, isUpstream ? 503 : 500);
-    }
-
-    // Success
-    return sendVapiOrSimple(res, toolCallId, result, 200);
-  } catch (err) {
-    const rawMessage = asErrorMessage(err);
-    const isUpstream = isTaxiCallerUpstreamFailureMessage(rawMessage);
-
-    // Full detail only in logs
-    console.log("[/create-booking] ERROR", { rawMessage });
-
-    const clientPayload = {
-      success: false,
-      error: sanitizeClientError(rawMessage)
-    };
-
-    return sendVapiOrSimple(res, toolCallId, clientPayload, isUpstream ? 503 : 500);
-  }
-});
-
-// =========================
-// START SERVER
-// =========================
-const PORT = Number(process.env.PORT || 3000);
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
