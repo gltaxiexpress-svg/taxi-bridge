@@ -514,21 +514,46 @@ app.post("/create-booking", async (req, res) => {
     toolCallId: toolCallId || null
   });
 
-  const result = await createBookerOrderOfficial({
-    pickup_address,
-    destination_address,
-    customer_phone,
-    notes
-  });
+  try {
+    const result = await createBookerOrderOfficial({
+      pickup_address,
+      destination_address,
+      customer_phone,
+      notes
+    });
 
-  const status = result.success ? 200 : 500;
-  return sendVapiOrSimple(res, toolCallId, result, status);
+    // If createBookerOrderOfficial returns a structured failure, decide status here.
+    // Use 503 for upstream failures so callers know it's dependency outage.
+    if (!result?.success) {
+      const msg = String(result?.error || "");
+      const isUpstream =
+        msg.includes("Official JWT error 502") ||
+        msg.includes("502 Bad Gateway") ||
+        msg.includes("fetch failed") ||
+        msg.toLowerCase().includes("timeout");
+
+      const status = isUpstream ? 503 : 500;
+      return sendVapiOrSimple(res, toolCallId, result, status);
+    }
+
+    return sendVapiOrSimple(res, toolCallId, result, 200);
+  } catch (err) {
+    const message = String(err?.message || err);
+
+    // RC/TX upstream failures: return 503, never crash the process
+    const isUpstream =
+      message.includes("Official JWT error 502") ||
+      message.includes("502 Bad Gateway") ||
+      message.includes("fetch failed") ||
+      message.toLowerCase().includes("timeout");
+
+    console.log("[/create-booking] ERROR", { message });
+
+    const result = {
+      success: false,
+      error: message
+    };
+
+    return sendVapiOrSimple(res, toolCallId, result, isUpstream ? 503 : 500);
+  }
 });
-
-/**
- * =========================
- * START SERVER
- * =========================
- */
-const PORT = Number(process.env.PORT || 3000);
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
