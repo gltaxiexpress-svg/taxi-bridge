@@ -1,5 +1,4 @@
-/**
- // server.js (ESM) — STAGING ONLY — Minimal & Robust
+// server.js (ESM) — STAGING ONLY — Minimal & Robust
 // Goal: Vapi → /create-booking → TaxiCaller Official Booker API (RC)
 // Requirements:
 // - No duplicate routes
@@ -7,7 +6,6 @@
 // - Controlled JSON errors; upstream failures => HTTP 503
 // - Keep Vapi tool-calls compatible
 // - Works with: node server.js
- */
 
 import express from "express";
 
@@ -15,20 +13,16 @@ console.log("BOOT:", new Date().toISOString());
 
 const app = express();
 
-/**
- * =========================
- * BODY PARSING
- * =========================
- * Accept everything as text to avoid express.json() crashes.
- * Parse manually in parseBodyOnce().
- */
+// =========================
+// BODY PARSING
+// =========================
+// Accept everything as text to avoid express.json() crashes.
+// Parse manually in parseBodyOnce().
 app.use(express.text({ type: "*/*", limit: "2mb" }));
 
-/**
- * =========================
- * ENV
- * =========================
- */
+// =========================
+// ENV
+// =========================
 const PROBE_SECRET = String(process.env.PROBE_SECRET || "");
 
 const GOOGLE_MAPS_API_KEY = String(process.env.GOOGLE_MAPS_API_KEY || "");
@@ -43,11 +37,9 @@ const TAXICALLER_COMPANY_ID = Number(process.env.TAXICALLER_COMPANY_ID || 0);
 const TAXICALLER_OFFICIAL_JWT_SUBJECT = String(process.env.TAXICALLER_OFFICIAL_JWT_SUBJECT || "*");
 const TAXICALLER_OFFICIAL_JWT_TTL_SECONDS = Number(process.env.TAXICALLER_OFFICIAL_JWT_TTL_SECONDS || 900);
 
-/**
- * =========================
- * HELPERS
- * =========================
- */
+// =========================
+// HELPERS
+// =========================
 function requireEnv(name) {
   if (!process.env[name]) throw new Error(`Missing env var: ${name}`);
 }
@@ -91,6 +83,7 @@ function isLikelyE164(phone) {
 function asErrorMessage(e) {
   return String(e?.message || e || "Unknown error");
 }
+
 // Parse request body exactly once in a route.
 // We use express.text so req.body is usually a string and we JSON.parse manually.
 function parseBodyOnce(req) {
@@ -163,11 +156,9 @@ function requireProbeSecret(req, res, next) {
   return next();
 }
 
-/**
- * =========================
- * fetchWithTimeout (stability)
- * =========================
- */
+// =========================
+// fetchWithTimeout (stability)
+// =========================
 async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || 20000));
@@ -201,11 +192,22 @@ function isTaxiCallerUpstreamFailureMessage(message) {
     m.includes("timeout after")
   );
 }
-/**
- * =========================
- * GOOGLE MAPS: GEOCODE + DIRECTIONS
- * =========================
- */
+
+function sanitizeClientError(message) {
+  const msg = String(message || "");
+
+  // If it's upstream RC failure, return a short, clean message
+  if (isTaxiCallerUpstreamFailureMessage(msg)) {
+    return "TaxiCaller RC temporarily unavailable";
+  }
+
+  // Otherwise keep it short (avoid leaking internals)
+  if (msg.length > 160) return msg.slice(0, 160) + "…";
+  return msg || "Unknown error";
+}
+// =========================
+// GOOGLE MAPS: GEOCODE + DIRECTIONS
+// =========================
 async function geocode(address) {
   requireEnv("GOOGLE_MAPS_API_KEY");
 
@@ -264,11 +266,9 @@ async function directions(from, to) {
   return { dist, edur, pts };
 }
 
-/**
- * =========================
- * OFFICIAL JWT (GET /api/v1/jwt/for-key)
- * =========================
- */
+// =========================
+// OFFICIAL JWT (GET /api/v1/jwt/for-key)
+// =========================
 const OFFICIAL_JWT_RENEW_EARLY_SECONDS = 120;
 let officialJwtCache = { token: null, expiresAtMs: 0 };
 
@@ -315,7 +315,10 @@ async function generateOfficialTaxiCallerJwt({
     bodyPreview: text.slice(0, 240)
   });
 
-  if (!res.ok) throw new Error(`Official JWT error ${res.status}: ${text.slice(0, 400)}`);
+  if (!res.ok) {
+    // Keep raw HTML/body detail in logs above; throwing is fine (routes sanitize for client)
+    throw new Error(`Official JWT error ${res.status}: ${text.slice(0, 400)}`);
+  }
 
   let data;
   try {
@@ -347,11 +350,9 @@ async function getOfficialTaxiCallerJwt() {
     ttlSeconds: TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
   });
 }
-/**
- * =========================
- * BOOKER PAYLOAD + CREATE ORDER
- * =========================
- */
+// =========================
+// BOOKER PAYLOAD + CREATE ORDER
+// =========================
 function buildOfficialBookerOrderPayload({ pickup, dropoff, customerPhone, notes = "" }) {
   const pickupCoords = toE6([pickup.lon, pickup.lat]); // [lonE6, latE6]
   const dropoffCoords = toE6([dropoff.lon, dropoff.lat]);
@@ -499,6 +500,8 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
   }
 
   if (!res.ok) {
+    // Keep detailed preview in logs; routes sanitize for client
+    console.log("[OFFICIAL BOOKER] notOk", { status: res.status, bodyPreview: safeTextPreview });
     return { success: false, error: `Booker order error ${res.status}: ${safeTextPreview}` };
   }
 
@@ -512,11 +515,10 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
 
   return { success: true, booking_id: String(bookingId), eta: "Soon" };
 }
-/**
- * =========================
- * ROUTES (single block only)
- * =========================
- */
+// =========================
+// ROUTES (single block only)
+// =========================
+
 app.get("/routes-check", (_req, res) => {
   return res.status(200).json({
     ok: true,
@@ -535,27 +537,29 @@ app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) 
       expiresAtMs: officialJwtCache.expiresAtMs
     });
   } catch (e) {
-    const message = asErrorMessage(e);
-    const isUpstream = isTaxiCallerUpstreamFailureMessage(message);
+    const rawMessage = asErrorMessage(e);
+    const isUpstream = isTaxiCallerUpstreamFailureMessage(rawMessage);
+
+    // Full detail only in logs
+    console.log("[/taxicaller/official-jwt-check] ERROR", { rawMessage });
+
     return res.status(isUpstream ? 503 : 500).json({
       ok: false,
-      error: message,
+      error: sanitizeClientError(rawMessage),
       upstream: isUpstream ? "taxicaller-rc" : null
     });
   }
 });
 
-/**
- * =========================
- * /create-booking
- * =========================
- * Accepts:
- * - Direct JSON: { pickup_address, destination_address, customer_phone, notes? }
- * - Vapi tool-calls payload: body.message.toolCallList[0].function.arguments
- *
- * Returns:
- * - Vapi wrapper when toolCallId exists: { results: [{ toolCallId, result: ... }] }
- */
+// =========================
+// /create-booking
+// =========================
+// Accepts:
+// - Direct JSON: { pickup_address, destination_address, customer_phone, notes? }
+// - Vapi tool-calls payload: body.message.toolCallList[0].function.arguments
+//
+// Returns:
+// - Vapi wrapper when toolCallId exists: { results: [{ toolCallId, result: ... }] }
 app.post("/create-booking", async (req, res) => {
   let body;
   try {
@@ -592,28 +596,42 @@ app.post("/create-booking", async (req, res) => {
       notes
     });
 
+    // Structured failure (no throw), sanitize what we return to client
     if (!result?.success) {
-      const msg = String(result?.error || "");
-      const isUpstream = isTaxiCallerUpstreamFailureMessage(msg);
-      return sendVapiOrSimple(res, toolCallId, result, isUpstream ? 503 : 500);
+      const rawMessage = String(result?.error || "");
+      const isUpstream = isTaxiCallerUpstreamFailureMessage(rawMessage);
+
+      // Full detail only in logs
+      console.log("[/create-booking] FAIL", { rawMessage });
+
+      const clientPayload = {
+        success: false,
+        error: sanitizeClientError(rawMessage)
+      };
+
+      return sendVapiOrSimple(res, toolCallId, clientPayload, isUpstream ? 503 : 500);
     }
 
+    // Success
     return sendVapiOrSimple(res, toolCallId, result, 200);
   } catch (err) {
-    const message = asErrorMessage(err);
-    const isUpstream = isTaxiCallerUpstreamFailureMessage(message);
+    const rawMessage = asErrorMessage(err);
+    const isUpstream = isTaxiCallerUpstreamFailureMessage(rawMessage);
 
-    console.log("[/create-booking] ERROR", { message });
+    // Full detail only in logs
+    console.log("[/create-booking] ERROR", { rawMessage });
 
-    const payload = { success: false, error: message };
-    return sendVapiOrSimple(res, toolCallId, payload, isUpstream ? 503 : 500);
+    const clientPayload = {
+      success: false,
+      error: sanitizeClientError(rawMessage)
+    };
+
+    return sendVapiOrSimple(res, toolCallId, clientPayload, isUpstream ? 503 : 500);
   }
 });
 
-/**
- * =========================
- * START SERVER
- * =========================
- */
+// =========================
+// START SERVER
+// =========================
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
