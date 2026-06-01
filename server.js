@@ -521,8 +521,20 @@ app.post("/create-booking", async (req, res) => {
     notes
   });
 
-  const status = result.success ? 200 : 500;
-  return sendVapiOrSimple(res, toolCallId, result, status);
+  if (result.success) {
+    return sendVapiOrSimple(res, toolCallId, result, 200);
+  }
+
+  // Si es un error por input del usuario, devolvemos 400.
+  // Si es un rechazo "de negocio" (ej: no hay vehículos), devolvemos 200 con success:false
+  // para que Vapi no lo trate como tool failure.
+  const msg = String(result.error || "");
+  const isBadRequest =
+    msg.includes("E.164") ||
+    msg.includes("Missing pickup_address") ||
+    msg.includes("Missing pickup_address or destination_address");
+
+  return sendVapiOrSimple(res, toolCallId, result, isBadRequest ? 400 : 200);
 });
 
 /**
