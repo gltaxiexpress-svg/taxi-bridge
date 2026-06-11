@@ -231,6 +231,8 @@ async function directions(from, to) {
  */
 const OFFICIAL_JWT_RENEW_EARLY_SECONDS = 120;
 let officialJwtCache = { token: null, expiresAtMs: 0 };
+const lastOrderByPhone = new Map(); // phone -> { orderId, createdAtMs }
+const LAST_ORDER_TTL_MS = 60 * 60 * 1000; // 60 minutes
 
 function clampTtl(ttl) {
   const n = Number(ttl);
@@ -521,10 +523,20 @@ app.post("/create-booking", async (req, res) => {
     notes
   });
 
-  if (result.success) {
-    console.log("[create-booking] booking_id", result.booking_id);
-    return sendVapiOrSimple(res, toolCallId, result, 200);
+if (result.success) {
+  console.log("[create-booking] booking_id", result.booking_id);
+
+  const phoneKey = String(customer_phone || "").trim();
+  if (phoneKey) {
+    lastOrderByPhone.set(phoneKey, { orderId: result.booking_id, createdAtMs: Date.now() });
+    console.log("[create-booking] saved lastOrderByPhone", {
+      phone: maskPhone(phoneKey),
+      orderId: result.booking_id
+    });
   }
+
+  return sendVapiOrSimple(res, toolCallId, result, 200);
+}
 
   // Si es un error por input del usuario, devolvemos 400.
   // Si es un rechazo "de negocio" (ej: no hay vehículos), devolvemos 200 con success:false
@@ -540,11 +552,15 @@ app.post("/create-booking", async (req, res) => {
 
 /**
  * =========================
- * /cancel-booking (by order_id)
+ * /cancel-booking (by order_id OR caller_phone)
  * =========================
  * Accepts:
- * - Direct JSON: { order_id, reason? }
+ * - Direct JSON: { order_id?, caller_phone?, reason? }
  * - Vapi tool-calls payload
+ *
+ * Behavior:
+ * - If order_id is provided: cancels that exact order
+ * - Else if caller_phone is provided: cancels the most recent booking for that phone within last 60 minutes
  */
 app.post("/cancel-booking", async (req, res) => {
   let body;
@@ -561,11 +577,39 @@ app.post("/cancel-booking", async (req, res) => {
   const { toolCallId, args } = extractVapiToolCall(body);
   const input = toolCallId ? args : body;
 
-  const order_id = String(input?.order_id || "").trim();
+  const caller_phone = String(input?.caller_phone || "").trim();
+  let order_id = String(input?.order_id || "").trim();
   const reason = input?.reason != null ? String(input.reason) : "";
 
+  // If order_id missing, try to resolve from the last booking for this phone (<= 60 min)
+  if (!order_id && caller_phone) {
+    const rec = lastOrderByPhone.get(caller_phone);
+
+    if (!rec) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "No recent booking found for this phone number" },
+        200
+      );
+    }
+
+    const ageMs = Date.now() - rec.createdAtMs;
+    if (ageMs > LAST_ORDER_TTL_MS) {
+      lastOrderByPhone.delete(caller_phone);
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "Last booking for this phone number is too old to cancel automatically" },
+        200
+      );
+    }
+
+    order_id = rec.orderId;
+  }
+
   if (!order_id) {
-    return sendVapiOrSimple(res, toolCallId, { success: false, error: "Missing order_id" }, 400);
+    return sendVapiOrSimple(res, toolCallId, { success: false, error: "Missing order_id or caller_phone" }, 400);
   }
 
   try {
@@ -597,24 +641,28 @@ app.post("/cancel-booking", async (req, res) => {
     }
 
     if (!tcRes.ok) {
-      return sendVapiOrSimple(res, toolCallId, {
-        success: false,
-        error: `Cancel error ${tcRes.status}`,
-        data
-      }, 200);
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: `Cancel error ${tcRes.status}`, data },
+        200
+      );
     }
 
-    return sendVapiOrSimple(res, toolCallId, {
-      success: true,
-      order_id,
-      order_status: data?.order_status || data
-    }, 200);
+    // optional: clear cached last order so it can't be canceled twice
+    if (caller_phone) {
+      const rec = lastOrderByPhone.get(caller_phone);
+      if (rec?.orderId === order_id) lastOrderByPhone.delete(caller_phone);
+    }
 
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: true, order_id, order_status: data?.order_status || data },
+      200
+    );
   } catch (e) {
-    return sendVapiOrSimple(res, toolCallId, {
-      success: false,
-      error: String(e?.message || e)
-    }, 200);
+    return sendVapiOrSimple(res, toolCallId, { success: false, error: String(e?.message || e) }, 200);
   }
 });
 
