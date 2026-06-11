@@ -539,6 +539,86 @@ app.post("/create-booking", async (req, res) => {
 
 /**
  * =========================
+ * /cancel-booking (by order_id)
+ * =========================
+ * Accepts:
+ * - Direct JSON: { order_id, reason? }
+ * - Vapi tool-calls payload
+ */
+app.post("/cancel-booking", async (req, res) => {
+  let body;
+  try {
+    body = parseBodyOnce(req);
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_JSON_BODY",
+      message: String(e?.message || e)
+    });
+  }
+
+  const { toolCallId, args } = extractVapiToolCall(body);
+  const input = toolCallId ? args : body;
+
+  const order_id = String(input?.order_id || "").trim();
+  const reason = input?.reason != null ? String(input.reason) : "";
+
+  if (!order_id) {
+    return sendVapiOrSimple(res, toolCallId, { success: false, error: "Missing order_id" }, 400);
+  }
+
+  try {
+    requireOfficialEnv();
+    const jwt = await getOfficialTaxiCallerJwt();
+
+    const url = joinUrl(
+      TAXICALLER_OFFICIAL_API_BASE_URL,
+      `/api/v1/booker/order/${encodeURIComponent(order_id)}/cancel`
+    );
+
+    const tcRes = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        authorization: `Bearer ${jwt}`
+      },
+      body: JSON.stringify({ reason })
+    });
+
+    const text = await tcRes.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+
+    if (!tcRes.ok) {
+      return sendVapiOrSimple(res, toolCallId, {
+        success: false,
+        error: `Cancel error ${tcRes.status}`,
+        data
+      }, 200);
+    }
+
+    return sendVapiOrSimple(res, toolCallId, {
+      success: true,
+      order_id,
+      order_status: data?.order_status || data
+    }, 200);
+
+  } catch (e) {
+    return sendVapiOrSimple(res, toolCallId, {
+      success: false,
+      error: String(e?.message || e)
+    }, 200);
+  }
+});
+
+/**
+ * =========================
  * START SERVER
  * =========================
  */
