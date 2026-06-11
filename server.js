@@ -522,6 +522,7 @@ app.post("/create-booking", async (req, res) => {
   });
 
   if (result.success) {
+    console.log("[create-booking] booking_id", result.booking_id);
     return sendVapiOrSimple(res, toolCallId, result, 200);
   }
 
