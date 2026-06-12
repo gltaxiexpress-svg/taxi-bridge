@@ -476,6 +476,8 @@ app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) 
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+const lastOrderByPhone = new Map();
+const LAST_ORDER_TTL_MS = 60 * 60 * 1000; // 60 min
 
 /**
  * =========================
@@ -597,7 +599,7 @@ app.post("/create-booking", async (req, res) => {
       );
     }
   }
-
+  
   // ---- flujo normal de create_booking ----
   const pickup_address = String(input?.pickup_address || "").trim();
   const destination_address = String(input?.destination_address || "").trim();
@@ -641,6 +643,122 @@ app.post("/create-booking", async (req, res) => {
     msg.includes("Missing pickup_address or destination_address");
 
   return sendVapiOrSimple(res, toolCallId, result, isBadRequest ? 400 : 200);
+});
+/**
+ * =========================
+ * /track-booking (by order_id OR caller_phone)
+ * =========================
+ * Accepts:
+ * - Direct JSON: { order_id?, caller_phone? }
+ * - Vapi tool-calls payload
+ *
+ * Behavior:
+ * - If order_id is provided: tracks that exact order
+ * - Else if caller_phone is provided: tracks the most recent booking for that phone within last 60 minutes
+ */
+app.post("/track-booking", async (req, res) => {
+  let body;
+  try {
+    body = parseBodyOnce(req);
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_JSON_BODY",
+      message: String(e?.message || e)
+    });
+  }
+
+  const { toolCallId, args } = extractVapiToolCall(body);
+  const input = toolCallId ? args : body;
+
+  const caller_phone = String(input?.caller_phone || "").trim();
+  let order_id = String(input?.order_id || "").trim();
+
+  // Resolve by phone (most recent order within TTL)
+  if (!order_id && caller_phone) {
+    const rec = lastOrderByPhone.get(caller_phone);
+
+    if (!rec) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "No recent booking found for this phone number" },
+        200
+      );
+    }
+
+    const ageMs = Date.now() - rec.createdAtMs;
+    if (ageMs > LAST_ORDER_TTL_MS) {
+      lastOrderByPhone.delete(caller_phone);
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "Last booking for this phone number is too old to track automatically" },
+        200
+      );
+    }
+
+    order_id = rec.orderId;
+  }
+
+  if (!order_id) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: "Missing order_id or caller_phone" },
+      200
+    );
+  }
+
+  try {
+    requireOfficialEnv();
+    const jwt = await getOfficialTaxiCallerJwt();
+
+    const url = joinUrl(
+      TAXICALLER_OFFICIAL_API_BASE_URL,
+      `/api/v1/booker/order/${encodeURIComponent(order_id)}/track`
+    );
+
+    const tcRes = await fetch(url, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${jwt}`
+      }
+    });
+
+    const text = await tcRes.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+
+    if (!tcRes.ok) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: `Track error ${tcRes.status}`, data },
+        200
+      );
+    }
+
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: true, order_id, track: data?.track || data },
+      200
+    );
+  } catch (e) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: String(e?.message || e) },
+      200
+    );
+  }
 });
 /**
  * =========================
