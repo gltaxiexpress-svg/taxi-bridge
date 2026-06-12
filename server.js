@@ -999,17 +999,39 @@ app.post("/fare-estimate", async (req, res) => {
     const toTcCoords = ({ lat, lng }) => [Math.round(lng * 1e6), Math.round(lat * 1e6)];
 
     // 2) Distance Matrix for dist(m) + dur(s)
-    const dmUrl =
-      `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${p.lat},${p.lng}&destinations=${d.lat},${d.lng}&key=${googleKey}`;
-    const dmRes = await fetch(dmUrl);
-    const dm = await dmRes.json();
-    const el = dm?.rows?.[0]?.elements?.[0];
-    const distMeters = el?.distance?.value;
-    const durSeconds = el?.duration?.value;
+const dmUrl =
+  `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${p.lat},${p.lng}&destinations=${d.lat},${d.lng}&key=${googleKey}`;
+const dmRes = await fetch(dmUrl);
+const dmText = await dmRes.text();
 
-    if (typeof distMeters !== "number" || typeof durSeconds !== "number") {
-      throw new Error("Could not compute distance/duration from Google Distance Matrix");
-    }
+let dm;
+try { dm = JSON.parse(dmText); } catch { dm = { raw: dmText }; }
+
+const el = dm?.rows?.[0]?.elements?.[0];
+const elementStatus = el?.status;
+
+if (dm?.status !== "OK" || elementStatus !== "OK") {
+  return sendVapiOrSimple(
+    res,
+    toolCallId,
+    {
+      success: false,
+      error: "GOOGLE_DISTANCE_MATRIX_FAILED",
+      google: {
+        httpStatus: dmRes.status,
+        status: dm?.status,
+        error_message: dm?.error_message,
+        elementStatus,
+        origin: `${p.lat},${p.lng}`,
+        destination: `${d.lat},${d.lng}`
+      }
+    },
+    200
+  );
+}
+
+const distMeters = el.distance.value;
+const durSeconds = el.duration.value;
 
     // 3) Build minimal TaxiCaller availability payload
     const nowSec = Math.floor(Date.now() / 1000);
