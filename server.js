@@ -808,20 +808,35 @@ app.post("/status-booking", async (req, res) => {
     const rec = lastOrderByPhone.get(caller_phone);
 
     if (!rec) {
-      return sendVapiOrSimple(res, toolCallId, { success: false, error: "No recent booking found for this phone number" }, 200);
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "No recent booking found for this phone number" },
+        200
+      );
     }
 
     const ageMs = Date.now() - rec.createdAtMs;
     if (ageMs > LAST_ORDER_TTL_MS) {
       lastOrderByPhone.delete(caller_phone);
-      return sendVapiOrSimple(res, toolCallId, { success: false, error: "Last booking for this phone number is too old" }, 200);
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "Last booking for this phone number is too old" },
+        200
+      );
     }
 
     order_id = rec.orderId;
   }
 
   if (!order_id) {
-    return sendVapiOrSimple(res, toolCallId, { success: false, error: "Missing order_id or caller_phone" }, 200);
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: "Missing order_id or caller_phone" },
+      200
+    );
   }
 
   try {
@@ -844,7 +859,11 @@ app.post("/status-booking", async (req, res) => {
     const text = await tcRes.text();
 
     let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
 
     if (!tcRes.ok) {
       return sendVapiOrSimple(
@@ -857,35 +876,58 @@ app.post("/status-booking", async (req, res) => {
 
     const order_status = data?.order_status || data;
 
-    // Try to compute an ETA in seconds from node_etas if present
-    // node_etas often contains per-node ETAs; we want pickup (seq 0) ETA if available.
+    // ---- FIXED ETA PARSER ----
     let etaSeconds = null;
     const nodeEtas = order_status?.node_etas;
 
     if (Array.isArray(nodeEtas) && nodeEtas.length > 0) {
-      // Find pickup node ETA (seq 0) if present, otherwise take first
       const pickupEta = nodeEtas.find((n) => n?.seq === 0) || nodeEtas[0];
+      const nowSec = Math.floor(Date.now() / 1000);
 
-      // Common patterns: pickupEta.eta (seconds), or pickupEta.times.arrive (unix seconds)
+      // Case A: eta is a NUMBER (seconds)
       if (typeof pickupEta?.eta === "number") {
-        etaSeconds = pickupEta.eta;
-      } else if (typeof pickupEta?.times?.arrive === "number") {
-        const nowSec = Math.floor(Date.now() / 1000);
+        etaSeconds = Math.max(0, pickupEta.eta);
+      }
+
+      // Case B: eta is an OBJECT with arrive/depart as unix seconds (this is your current TaxiCaller format)
+      else if (typeof pickupEta?.eta?.arrive === "number") {
+        etaSeconds = Math.max(0, pickupEta.eta.arrive - nowSec);
+      }
+
+      // Case C: times.arrive unix seconds (alternate format)
+      else if (typeof pickupEta?.times?.arrive === "number") {
         etaSeconds = Math.max(0, pickupEta.times.arrive - nowSec);
       }
     }
 
-    const etaMinutes = typeof etaSeconds === "number" ? Math.max(0, Math.round(etaSeconds / 60)) : null;
+    const etaMinutes =
+      typeof etaSeconds === "number" ? Math.max(0, Math.round(etaSeconds / 60)) : null;
 
-    return sendVapiOrSimple(res, toolCallId, {
-      success: true,
-      order_id,
-      eta_seconds: etaSeconds,
-      eta_minutes: etaMinutes,
-      status: order_status
-    }, 200);
+    // Optional helper fields (nice for the assistant)
+    const hasDriver = !!order_status?.resource?.driver?.id;
+    const hasVehicle = !!order_status?.resource?.vehicle?.id;
+
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      {
+        success: true,
+        order_id,
+        eta_seconds: etaSeconds,
+        eta_minutes: etaMinutes,
+        has_driver: hasDriver,
+        has_vehicle: hasVehicle,
+        status: order_status
+      },
+      200
+    );
   } catch (e) {
-    return sendVapiOrSimple(res, toolCallId, { success: false, error: String(e?.message || e) }, 200);
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: String(e?.message || e) },
+      200
+    );
   }
 });
 /**
