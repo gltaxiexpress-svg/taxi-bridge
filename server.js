@@ -1126,27 +1126,40 @@ if (!routesRes.ok || typeof distMeters !== "number" || !Number.isFinite(durSecon
       );
     }
 
-    const amount = slot.fare_quote.amount;
+   const amountRaw = slot.fare_quote.amount;
+const amount = typeof amountRaw === "string" ? Number(amountRaw) : amountRaw;
     const currency = slot.fare_quote.currency || null;
+    let estimated_fare_formatted = null;
+    if (!Number.isFinite(amount)) {
+  return sendVapiOrSimple(
+    res,
+    toolCallId,
+    { success: false, error: "Invalid fare amount", data },
+    200
+  );
+}
 
+if (currency === "USD" && typeof amount === "number") {
+  // TaxiCaller normalmente manda USD en centavos
+  estimated_fare_formatted = (amount / 100).toFixed(2); // "68.40"
+} else if (typeof amount === "number") {
+  // fallback genérico
+  estimated_fare_formatted = String(amount);
+}
     const etaUnix = slot.eta;
     const eta_minutes = typeof etaUnix === "number"
       ? Math.max(0, Math.round((etaUnix - nowSec) / 60))
       : null;
 
-    return sendVapiOrSimple(
-      res,
-      toolCallId,
-      {
-        success: true,
-        pickup_address: p.formatted,
-        destination_address: d.formatted,
-        estimated_fare_amount: amount,
-        currency,
-        eta_minutes
-      },
-      200
-    );
+   return sendVapiOrSimple(res, toolCallId, {
+  success: true,
+  pickup_address: p.formatted,
+  destination_address: d.formatted,
+  estimated_fare_amount: amount,                 // raw
+  estimated_fare_formatted,                      // string exacto para leer
+  currency,
+  eta_minutes
+}, 200);
   } catch (e) {
     return sendVapiOrSimple(
       res,
