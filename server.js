@@ -930,6 +930,210 @@ app.post("/status-booking", async (req, res) => {
     );
   }
 });
+// =========================
+// /fare-estimate
+// =========================
+// Input (direct JSON or Vapi tool-calls):
+// { pickup_address, destination_address, passengers?, customer_phone? }
+//
+// Output:
+// { success, estimated_fare_amount, currency, eta_minutes, pickup_address, destination_address }
+app.post("/fare-estimate", async (req, res) => {
+  let body;
+  try {
+    body = parseBodyOnce(req);
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_JSON_BODY",
+      message: String(e?.message || e)
+    });
+  }
+
+  const { toolCallId, args } = extractVapiToolCall(body);
+  const input = toolCallId ? args : body;
+
+  const pickup_address = String(input?.pickup_address || "").trim();
+  const destination_address = String(input?.destination_address || "").trim();
+  const passengers = Number.isFinite(Number(input?.passengers)) ? Number(input.passengers) : 1;
+
+  // Prefer explicit customer_phone; else use caller id from Vapi if present
+  const customer_phone =
+    String(input?.customer_phone || "").trim() ||
+    String(input?.caller_phone || "").trim() ||
+    "+10000000000";
+
+  if (!pickup_address || !destination_address) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: "Missing pickup_address or destination_address" },
+      200
+    );
+  }
+
+  try {
+    requireOfficialEnv();
+    const jwt = await getOfficialTaxiCallerJwt();
+
+    const googleKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (!googleKey) throw new Error("Missing GOOGLE_MAPS_API_KEY");
+
+    const companyId = Number(process.env.TAXICALLER_COMPANY_ID);
+    if (!Number.isFinite(companyId)) throw new Error("Missing TAXICALLER_COMPANY_ID");
+
+    // 1) Geocode pickup + destination
+    const geocode = async (address) => {
+      const url =
+        `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${googleKey}`;
+      const r = await fetch(url);
+      const j = await r.json();
+      const loc = j?.results?.[0]?.geometry?.location;
+      if (!loc) throw new Error(`Could not geocode address: ${address}`);
+      return { lat: loc.lat, lng: loc.lng, formatted: j.results[0].formatted_address };
+    };
+
+    const [p, d] = await Promise.all([geocode(pickup_address), geocode(destination_address)]);
+
+    // TaxiCaller wants coords as [Long, Lat] with *1e6
+    const toTcCoords = ({ lat, lng }) => [Math.round(lng * 1e6), Math.round(lat * 1e6)];
+
+    // 2) Distance Matrix for dist(m) + dur(s)
+    const dmUrl =
+      `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${p.lat},${p.lng}&destinations=${d.lat},${d.lng}&key=${googleKey}`;
+    const dmRes = await fetch(dmUrl);
+    const dm = await dmRes.json();
+    const el = dm?.rows?.[0]?.elements?.[0];
+    const distMeters = el?.distance?.value;
+    const durSeconds = el?.duration?.value;
+
+    if (typeof distMeters !== "number" || typeof durSeconds !== "number") {
+      throw new Error("Could not compute distance/duration from Google Distance Matrix");
+    }
+
+    // 3) Build minimal TaxiCaller availability payload
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    const payload = {
+      order: {
+        company_id: companyId,
+        provider_id: 0, // let system resolve via slots (TaxiCaller still returns slots with provider_id)
+        items: [
+          {
+            "@type": "passengers",
+            seq: 0,
+            passenger: {
+              name: "Caller",
+              phone: customer_phone,
+              email: null
+            },
+            client_id: 42,
+            account: null,
+            require: { seats: Math.max(1, passengers), wc: 0, bags: 0 },
+            pay_info: [{ "@t": 0, data: null }],
+            custom_fields: {}
+          }
+        ],
+        route: {
+          nodes: [
+            {
+              actions: [{ "@type": "client_action", item_seq: 0, action: "in" }],
+              location: { name: p.formatted, coords: toTcCoords(p) },
+              times: { arrive: { target: nowSec, latest: 0 } },
+              info: { all: "" },
+              seq: 0
+            },
+            {
+              actions: [{ "@type": "client_action", item_seq: 0, action: "out" }],
+              location: { name: d.formatted, coords: toTcCoords(d) },
+              times: null,
+              info: {},
+              seq: 1
+            }
+          ],
+          legs: [
+            {
+              meta: { dist: distMeters, est_dur: durSeconds },
+              pts: [],
+              from_seq: 0,
+              to_seq: 1
+            }
+          ],
+          meta: { dist: distMeters, est_dur: durSeconds }
+        }
+      }
+    };
+
+    const url = joinUrl(
+      process.env.TAXICALLER_OFFICIAL_API_BASE_URL,
+      `/api/v1/booker/availability/order`
+    );
+
+    const tcRes = await fetch(url, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        authorization: `Bearer ${jwt}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await tcRes.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    if (!tcRes.ok) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: `Availability error ${tcRes.status}`, data },
+        200
+      );
+    }
+
+    const slots = Array.isArray(data?.slots) ? data.slots : [];
+    const slot = slots.find(s => s?.fare_quote?.amount != null) || slots[0];
+
+    if (!slot || slot?.fare_quote?.amount == null) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "No fare quote returned", data },
+        200
+      );
+    }
+
+    const amount = slot.fare_quote.amount;
+    const currency = slot.fare_quote.currency || null;
+
+    const etaUnix = slot.eta;
+    const eta_minutes = typeof etaUnix === "number"
+      ? Math.max(0, Math.round((etaUnix - nowSec) / 60))
+      : null;
+
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      {
+        success: true,
+        pickup_address: p.formatted,
+        destination_address: d.formatted,
+        estimated_fare_amount: amount,
+        currency,
+        eta_minutes
+      },
+      200
+    );
+  } catch (e) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: String(e?.message || e) },
+      200
+    );
+  }
+});
 /**
  * =========================
  * START SERVER
