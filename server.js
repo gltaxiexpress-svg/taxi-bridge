@@ -503,101 +503,6 @@ app.post("/create-booking", async (req, res) => {
   const { toolCallId, args } = extractVapiToolCall(body);
   const input = toolCallId ? args : body;
 
-  // ✅ detectar nombre del tool (create_booking vs cancel_booking)
-  const toolName =
-    body?.message?.toolCalls?.[0]?.function?.name ||
-    body?.message?.toolCallList?.[0]?.function?.name ||
-    null;
-
-  // ✅ manejar cancelación aquí y salir
-  if (toolName === "cancel_booking") {
-    const phone = String(input?.caller_phone || input?.customer_phone || "").trim();
-    const orderId = String(input?.order_id || "").trim();
-
-    // Validación E.164 (si viene phone)
-    if (phone && !/^\+[1-9]\d{7,14}$/.test(phone)) {
-      const result = { success: false, error: "Invalid phone. Must be E.164 like +15709290722" };
-      return sendVapiOrSimple(res, toolCallId, result, 200);
-    }
-
-    // Si NO viene orderId, intenta resolver por teléfono desde tu memoria (solo si existe)
-    let resolvedOrderId = orderId;
-    if (!resolvedOrderId && phone) {
-      const last = lastOrderByPhone.get(phone);
-      if (last?.orderId) resolvedOrderId = last.orderId;
-    }
-
-    if (!resolvedOrderId) {
-      const result = {
-        success: false,
-        error: "MISSING_ORDER_ID",
-        message: "No tengo el número de pedido. Dígame el order_id o vuelva a reservar y luego cancelar."
-      };
-      return sendVapiOrSimple(res, toolCallId, result, 200);
-    }
-
-    // ✅ CANCELACIÓN REAL EN TAXICALLER (reutiliza la lógica de /cancel-booking)
-    const reason = input?.reason != null ? String(input.reason) : "";
-
-    try {
-      requireOfficialEnv();
-      const jwt = await getOfficialTaxiCallerJwt();
-
-      const url = joinUrl(
-        TAXICALLER_OFFICIAL_API_BASE_URL,
-        `/api/v1/booker/order/${encodeURIComponent(resolvedOrderId)}/cancel`
-      );
-
-      const tcRes = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          authorization: `Bearer ${jwt}`
-        },
-        body: JSON.stringify({ reason })
-      });
-
-      const text = await tcRes.text();
-
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = { raw: text };
-      }
-
-      if (!tcRes.ok) {
-        return sendVapiOrSimple(
-          res,
-          toolCallId,
-          { success: false, error: `Cancel error ${tcRes.status}`, data },
-          200
-        );
-      }
-
-      // optional: clear cached last order so it can't be canceled twice
-      if (phone) {
-        const rec = lastOrderByPhone.get(phone);
-        if (rec?.orderId === resolvedOrderId) lastOrderByPhone.delete(phone);
-      }
-
-      return sendVapiOrSimple(
-        res,
-        toolCallId,
-        { success: true, order_id: resolvedOrderId, order_status: data?.order_status || data },
-        200
-      );
-    } catch (e) {
-      return sendVapiOrSimple(
-        res,
-        toolCallId,
-        { success: false, error: String(e?.message || e) },
-        200
-      );
-    }
-  }
-  
   // ---- flujo normal de create_booking ----
   const pickup_address = String(input?.pickup_address || "").trim();
   const destination_address = String(input?.destination_address || "").trim();
@@ -630,17 +535,127 @@ app.post("/create-booking", async (req, res) => {
         orderId: result.booking_id
       });
     }
-
-    return sendVapiOrSimple(res, toolCallId, result, 200);
   }
 
-  const msg = String(result.error || "");
-  const isBadRequest =
-    msg.includes("E.164") ||
-    msg.includes("Missing pickup_address") ||
-    msg.includes("Missing pickup_address or destination_address");
+  return sendVapiOrSimple(res, toolCallId, result, 200);
+});
+/**
+ * =========================
+ * /cancel-booking
+ * =========================
+ * Accepts:
+ * - Direct JSON: { caller_phone?, order_id?, reason? }
+ * - Vapi tool-calls payload
+ *
+ * Behavior:
+ * - If order_id is provided: cancel that order
+ * - Else if caller_phone is provided: cancel most recent order for that phone (from lastOrderByPhone)
+ */
+app.post("/cancel-booking", async (req, res) => {
+  let body;
+  try {
+    body = parseBodyOnce(req);
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_JSON_BODY",
+      message: String(e?.message || e)
+    });
+  }
 
-  return sendVapiOrSimple(res, toolCallId, result, isBadRequest ? 400 : 200);
+  const { toolCallId, args } = extractVapiToolCall(body);
+  const input = toolCallId ? args : body;
+
+  const phone = String(input?.caller_phone || input?.customer_phone || "").trim();
+  const orderId = String(input?.order_id || "").trim();
+  const reason = input?.reason != null ? String(input.reason) : "";
+
+  if (phone && !/^\+[1-9]\d{7,14}$/.test(phone)) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: "Invalid phone. Must be E.164 like +15709290722" },
+      200
+    );
+  }
+
+  let resolvedOrderId = orderId;
+
+  if (!resolvedOrderId && phone) {
+    const rec = lastOrderByPhone.get(phone);
+    if (rec?.orderId) resolvedOrderId = rec.orderId;
+  }
+
+  if (!resolvedOrderId) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      {
+        success: false,
+        error: "MISSING_ORDER_ID",
+        message: "No tengo el número de pedido. Dígame el order_id o vuelva a reservar y luego cancelar."
+      },
+      200
+    );
+  }
+
+  try {
+    requireOfficialEnv();
+    const jwt = await getOfficialTaxiCallerJwt();
+
+    const url = joinUrl(
+      TAXICALLER_OFFICIAL_API_BASE_URL,
+      `/api/v1/booker/order/${encodeURIComponent(resolvedOrderId)}/cancel`
+    );
+
+    const tcRes = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        authorization: `Bearer ${jwt}`
+      },
+      body: JSON.stringify({ reason })
+    });
+
+    const text = await tcRes.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+
+    if (!tcRes.ok) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: `Cancel error ${tcRes.status}`, data },
+        200
+      );
+    }
+
+    // optional: clear cached last order so it can't be canceled twice
+    if (phone) {
+      const rec = lastOrderByPhone.get(phone);
+      if (rec?.orderId === resolvedOrderId) lastOrderByPhone.delete(phone);
+    }
+
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: true, order_id: resolvedOrderId, order_status: data?.order_status || data },
+      200
+    );
+  } catch (e) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: String(e?.message || e) },
+      200
+    );
+  }
 });
 /**
  * =========================
