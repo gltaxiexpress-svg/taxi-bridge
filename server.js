@@ -476,8 +476,6 @@ app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) 
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
-const lastOrderByPhone = new Map();
-const LAST_ORDER_TTL_MS = 60 * 60 * 1000; // 60 min
 
 /**
  * =========================
