@@ -775,6 +775,121 @@ app.post("/track-booking", async (req, res) => {
 });
 /**
  * =========================
+ * /status-booking (by order_id OR caller_phone)
+ * =========================
+ * Accepts:
+ * - Direct JSON: { order_id?, caller_phone? }
+ * - Vapi tool-calls payload
+ *
+ * Behavior:
+ * - If order_id is provided: fetch status for that order
+ * - Else if caller_phone is provided: use most recent cached order for that phone (within TTL)
+ */
+app.post("/status-booking", async (req, res) => {
+  let body;
+  try {
+    body = parseBodyOnce(req);
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_JSON_BODY",
+      message: String(e?.message || e)
+    });
+  }
+
+  const { toolCallId, args } = extractVapiToolCall(body);
+  const input = toolCallId ? args : body;
+
+  const caller_phone = String(input?.caller_phone || "").trim();
+  let order_id = String(input?.order_id || "").trim();
+
+  // Resolve by phone (most recent order within TTL)
+  if (!order_id && caller_phone) {
+    const rec = lastOrderByPhone.get(caller_phone);
+
+    if (!rec) {
+      return sendVapiOrSimple(res, toolCallId, { success: false, error: "No recent booking found for this phone number" }, 200);
+    }
+
+    const ageMs = Date.now() - rec.createdAtMs;
+    if (ageMs > LAST_ORDER_TTL_MS) {
+      lastOrderByPhone.delete(caller_phone);
+      return sendVapiOrSimple(res, toolCallId, { success: false, error: "Last booking for this phone number is too old" }, 200);
+    }
+
+    order_id = rec.orderId;
+  }
+
+  if (!order_id) {
+    return sendVapiOrSimple(res, toolCallId, { success: false, error: "Missing order_id or caller_phone" }, 200);
+  }
+
+  try {
+    requireOfficialEnv();
+    const jwt = await getOfficialTaxiCallerJwt();
+
+    const url = joinUrl(
+      TAXICALLER_OFFICIAL_API_BASE_URL,
+      `/api/v1/booker/order/${encodeURIComponent(order_id)}/status`
+    );
+
+    const tcRes = await fetch(url, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${jwt}`
+      }
+    });
+
+    const text = await tcRes.text();
+
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    if (!tcRes.ok) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: `Status error ${tcRes.status}`, data },
+        200
+      );
+    }
+
+    const order_status = data?.order_status || data;
+
+    // Try to compute an ETA in seconds from node_etas if present
+    // node_etas often contains per-node ETAs; we want pickup (seq 0) ETA if available.
+    let etaSeconds = null;
+    const nodeEtas = order_status?.node_etas;
+
+    if (Array.isArray(nodeEtas) && nodeEtas.length > 0) {
+      // Find pickup node ETA (seq 0) if present, otherwise take first
+      const pickupEta = nodeEtas.find((n) => n?.seq === 0) || nodeEtas[0];
+
+      // Common patterns: pickupEta.eta (seconds), or pickupEta.times.arrive (unix seconds)
+      if (typeof pickupEta?.eta === "number") {
+        etaSeconds = pickupEta.eta;
+      } else if (typeof pickupEta?.times?.arrive === "number") {
+        const nowSec = Math.floor(Date.now() / 1000);
+        etaSeconds = Math.max(0, pickupEta.times.arrive - nowSec);
+      }
+    }
+
+    const etaMinutes = typeof etaSeconds === "number" ? Math.max(0, Math.round(etaSeconds / 60)) : null;
+
+    return sendVapiOrSimple(res, toolCallId, {
+      success: true,
+      order_id,
+      eta_seconds: etaSeconds,
+      eta_minutes: etaMinutes,
+      status: order_status
+    }, 200);
+  } catch (e) {
+    return sendVapiOrSimple(res, toolCallId, { success: false, error: String(e?.message || e) }, 200);
+  }
+});
+/**
+ * =========================
  * START SERVER
  * =========================
  */
