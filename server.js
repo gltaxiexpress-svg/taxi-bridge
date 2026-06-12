@@ -994,8 +994,7 @@ app.post("/fare-estimate", async (req, res) => {
     };
 
     const [p, d] = await Promise.all([geocode(pickup_address), geocode(destination_address)]);
-    return sendVapiOrSimple(res, toolCallId, { success: false, error: "USING_ROUTES_BLOCK" }, 200);
-
+    
     // TaxiCaller wants coords as [Long, Lat] with *1e6
     const toTcCoords = ({ lat, lng }) => [Math.round(lng * 1e6), Math.round(lat * 1e6)];
 
