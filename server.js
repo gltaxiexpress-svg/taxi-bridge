@@ -998,40 +998,40 @@ app.post("/fare-estimate", async (req, res) => {
     // TaxiCaller wants coords as [Long, Lat] with *1e6
     const toTcCoords = ({ lat, lng }) => [Math.round(lng * 1e6), Math.round(lat * 1e6)];
 
-    // 2) Distance Matrix for dist(m) + dur(s)
-const dmUrl =
-  `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${p.lat},${p.lng}&destinations=${d.lat},${d.lng}&key=${googleKey}`;
-const dmRes = await fetch(dmUrl);
-const dmText = await dmRes.text();
+    // 2) Routes API for dist(m) + dur(s)
+const routesRes = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Goog-Api-Key": googleKey,
+    "X-Goog-FieldMask": "routes.distanceMeters,routes.duration"
+  },
+  body: JSON.stringify({
+    origin: { location: { latLng: { latitude: p.lat, longitude: p.lng } } },
+    destination: { location: { latLng: { latitude: d.lat, longitude: d.lng } } },
+    travelMode: "DRIVE",
+    routingPreference: "TRAFFIC_UNAWARE"
+  })
+});
 
-let dm;
-try { dm = JSON.parse(dmText); } catch { dm = { raw: dmText }; }
+const routesText = await routesRes.text();
+let routesJson;
+try { routesJson = JSON.parse(routesText); } catch { routesJson = { raw: routesText }; }
 
-const el = dm?.rows?.[0]?.elements?.[0];
-const elementStatus = el?.status;
+const route = routesJson?.routes?.[0];
+const distMeters = route?.distanceMeters;
 
-if (dm?.status !== "OK" || elementStatus !== "OK") {
-  return sendVapiOrSimple(
-    res,
-    toolCallId,
-    {
-      success: false,
-      error: "GOOGLE_DISTANCE_MATRIX_FAILED",
-      google: {
-        httpStatus: dmRes.status,
-        status: dm?.status,
-        error_message: dm?.error_message,
-        elementStatus,
-        origin: `${p.lat},${p.lng}`,
-        destination: `${d.lat},${d.lng}`
-      }
-    },
-    200
-  );
+const durStr = route?.duration; // e.g. "683s" or "683.2s"
+const durSeconds =
+  typeof durStr === "string" ? Math.round(parseFloat(durStr.replace("s", ""))) : null;
+
+if (!routesRes.ok || typeof distMeters !== "number" || !Number.isFinite(durSeconds)) {
+  return sendVapiOrSimple(res, toolCallId, {
+    success: false,
+    error: "GOOGLE_ROUTES_FAILED",
+    google: { httpStatus: routesRes.status, body: routesJson }
+  }, 200);
 }
-
-const distMeters = el.distance.value;
-const durSeconds = el.duration.value;
 
     // 3) Build minimal TaxiCaller availability payload
     const nowSec = Math.floor(Date.now() / 1000);
