@@ -1141,7 +1141,7 @@ app.post("/fare-estimate", async (req, res) => {
     let fare_speak = null;
 
     if (typeof priceRaw === "number" && Number.isFinite(priceRaw)) {
-      fare_speak = String(priceRaw); // e.g. "60" or "220" or "7.2"
+      fare_speak = String(priceRaw);
     } else {
       // Fallback to amount only if price is missing
       if (slot?.fare_quote?.amount == null) {
@@ -1171,6 +1171,14 @@ app.post("/fare-estimate", async (req, res) => {
       } else if (typeof amount === "number") {
         fare_speak = String(amount);
       }
+    }
+
+    // ✅ Normalize 10x scale + remove decimals using Math.round
+    // Example: "72.00" -> 72 -> /10 => 7.2 -> round => "7"
+    const fareNumber = Number(fare_speak);
+    if (Number.isFinite(fareNumber)) {
+      const normalized = fareNumber / 10;
+      fare_speak = String(Math.round(normalized));
     }
 
     const etaUnix = slot.eta;
