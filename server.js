@@ -1117,34 +1117,60 @@ app.post("/fare-estimate", async (req, res) => {
     const slots = Array.isArray(data?.slots) ? data.slots : [];
     const slot = slots.find(s => s?.fare_quote?.amount != null) || slots[0];
 
-    if (!slot || slot?.fare_quote?.amount == null) {
+    if (!slot) {
       return sendVapiOrSimple(
         res,
         toolCallId,
-        { success: false, error: "No fare quote returned", data },
+        { success: false, error: "No slot returned", data },
         200
       );
     }
 
-    const amountRaw = slot.fare_quote.amount;
-    const amount = typeof amountRaw === "string" ? Number(amountRaw) : amountRaw;
-    const currency = slot.fare_quote.currency || null;
+    // ✅ Currency can be in different places
+    const currency =
+      slot?.fare?.currency ||
+      slot?.fare_quote?.currency ||
+      null;
 
-    if (!Number.isFinite(amount)) {
-      return sendVapiOrSimple(
-        res,
-        toolCallId,
-        { success: false, error: "Invalid fare amount", data },
-        200
-      );
-    }
+    // ✅ Prefer TaxiCaller "human price" (NO scaling)
+    const priceRaw =
+      slot?.fare?.price ??
+      slot?.fare_quote?.price ??
+      null;
 
-    let estimated_fare_formatted = null;
-    if (currency === "USD" && typeof amount === "number") {
-      // (Nota: esta conversión puede estar mal para tu cuenta, pero dejamos tu lógica igual por ahora)
-      estimated_fare_formatted = (amount / 100).toFixed(2);
-    } else if (typeof amount === "number") {
-      estimated_fare_formatted = String(amount);
+    let fare_speak = null;
+
+    if (typeof priceRaw === "number" && Number.isFinite(priceRaw)) {
+      fare_speak = String(priceRaw); // e.g. "60" or "220" or "7.2"
+    } else {
+      // Fallback to amount only if price is missing
+      if (slot?.fare_quote?.amount == null) {
+        return sendVapiOrSimple(
+          res,
+          toolCallId,
+          { success: false, error: "No fare quote returned", data },
+          200
+        );
+      }
+
+      const amountRaw = slot.fare_quote.amount;
+      const amount = typeof amountRaw === "string" ? Number(amountRaw) : amountRaw;
+
+      if (!Number.isFinite(amount)) {
+        return sendVapiOrSimple(
+          res,
+          toolCallId,
+          { success: false, error: "Invalid fare amount", data },
+          200
+        );
+      }
+
+      // keep your old logic only as fallback
+      if (currency === "USD" && typeof amount === "number") {
+        fare_speak = (amount / 100).toFixed(2);
+      } else if (typeof amount === "number") {
+        fare_speak = String(amount);
+      }
     }
 
     const etaUnix = slot.eta;
@@ -1152,18 +1178,13 @@ app.post("/fare-estimate", async (req, res) => {
       ? Math.max(0, Math.round((etaUnix - nowSec) / 60))
       : null;
 
-    // ✅ IMPORTANT: Provide a single speakable field and DO NOT return the raw amount.
-    const fare_speak = estimated_fare_formatted;
-
     return sendVapiOrSimple(res, toolCallId, {
       success: true,
       pickup_address: p.formatted,
       destination_address: d.formatted,
       currency,
       eta_minutes,
-      fare_speak,
-      estimated_fare_formatted
-      // ❌ removed: estimated_fare_amount
+      fare_speak
     }, 200);
 
   } catch (e) {
