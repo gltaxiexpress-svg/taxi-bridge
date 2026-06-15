@@ -937,7 +937,7 @@ app.post("/status-booking", async (req, res) => {
 // { pickup_address, destination_address, passengers?, customer_phone? }
 //
 // Output:
-// { success, estimated_fare_amount, currency, eta_minutes, pickup_address, destination_address }
+// { success, fare_speak, currency, eta_minutes, pickup_address, destination_address }
 app.post("/fare-estimate", async (req, res) => {
   let body;
   try {
@@ -994,44 +994,44 @@ app.post("/fare-estimate", async (req, res) => {
     };
 
     const [p, d] = await Promise.all([geocode(pickup_address), geocode(destination_address)]);
-    
+
     // TaxiCaller wants coords as [Long, Lat] with *1e6
     const toTcCoords = ({ lat, lng }) => [Math.round(lng * 1e6), Math.round(lat * 1e6)];
 
     // 2) Routes API for dist(m) + dur(s)
-const routesRes = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "X-Goog-Api-Key": googleKey,
-    "X-Goog-FieldMask": "routes.distanceMeters,routes.duration"
-  },
-  body: JSON.stringify({
-    origin: { location: { latLng: { latitude: p.lat, longitude: p.lng } } },
-    destination: { location: { latLng: { latitude: d.lat, longitude: d.lng } } },
-    travelMode: "DRIVE",
-    routingPreference: "TRAFFIC_UNAWARE"
-  })
-});
+    const routesRes = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": googleKey,
+        "X-Goog-FieldMask": "routes.distanceMeters,routes.duration"
+      },
+      body: JSON.stringify({
+        origin: { location: { latLng: { latitude: p.lat, longitude: p.lng } } },
+        destination: { location: { latLng: { latitude: d.lat, longitude: d.lng } } },
+        travelMode: "DRIVE",
+        routingPreference: "TRAFFIC_UNAWARE"
+      })
+    });
 
-const routesText = await routesRes.text();
-let routesJson;
-try { routesJson = JSON.parse(routesText); } catch { routesJson = { raw: routesText }; }
+    const routesText = await routesRes.text();
+    let routesJson;
+    try { routesJson = JSON.parse(routesText); } catch { routesJson = { raw: routesText }; }
 
-const route = routesJson?.routes?.[0];
-const distMeters = route?.distanceMeters;
+    const route = routesJson?.routes?.[0];
+    const distMeters = route?.distanceMeters;
 
-const durStr = route?.duration; // e.g. "683s" or "683.2s"
-const durSeconds =
-  typeof durStr === "string" ? Math.round(parseFloat(durStr.replace("s", ""))) : null;
+    const durStr = route?.duration; // e.g. "683s" or "683.2s"
+    const durSeconds =
+      typeof durStr === "string" ? Math.round(parseFloat(durStr.replace("s", ""))) : null;
 
-if (!routesRes.ok || typeof distMeters !== "number" || !Number.isFinite(durSeconds)) {
-  return sendVapiOrSimple(res, toolCallId, {
-    success: false,
-    error: "GOOGLE_ROUTES_FAILED",
-    google: { httpStatus: routesRes.status, body: routesJson }
-  }, 200);
-}
+    if (!routesRes.ok || typeof distMeters !== "number" || !Number.isFinite(durSeconds)) {
+      return sendVapiOrSimple(res, toolCallId, {
+        success: false,
+        error: "GOOGLE_ROUTES_FAILED",
+        google: { httpStatus: routesRes.status, body: routesJson }
+      }, 200);
+    }
 
     // 3) Build minimal TaxiCaller availability payload
     const nowSec = Math.floor(Date.now() / 1000);
@@ -1039,7 +1039,7 @@ if (!routesRes.ok || typeof distMeters !== "number" || !Number.isFinite(durSecon
     const payload = {
       order: {
         company_id: companyId,
-        provider_id: 0, // let system resolve via slots (TaxiCaller still returns slots with provider_id)
+        provider_id: 0,
         items: [
           {
             "@type": "passengers",
@@ -1126,40 +1126,46 @@ if (!routesRes.ok || typeof distMeters !== "number" || !Number.isFinite(durSecon
       );
     }
 
-   const amountRaw = slot.fare_quote.amount;
-const amount = typeof amountRaw === "string" ? Number(amountRaw) : amountRaw;
+    const amountRaw = slot.fare_quote.amount;
+    const amount = typeof amountRaw === "string" ? Number(amountRaw) : amountRaw;
     const currency = slot.fare_quote.currency || null;
-    let estimated_fare_formatted = null;
-    if (!Number.isFinite(amount)) {
-  return sendVapiOrSimple(
-    res,
-    toolCallId,
-    { success: false, error: "Invalid fare amount", data },
-    200
-  );
-}
 
-if (currency === "USD" && typeof amount === "number") {
-  // TaxiCaller normalmente manda USD en centavos
-  estimated_fare_formatted = (amount / 100).toFixed(2); // "68.40"
-} else if (typeof amount === "number") {
-  // fallback genérico
-  estimated_fare_formatted = String(amount);
-}
+    if (!Number.isFinite(amount)) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "Invalid fare amount", data },
+        200
+      );
+    }
+
+    let estimated_fare_formatted = null;
+    if (currency === "USD" && typeof amount === "number") {
+      // (Nota: esta conversión puede estar mal para tu cuenta, pero dejamos tu lógica igual por ahora)
+      estimated_fare_formatted = (amount / 100).toFixed(2);
+    } else if (typeof amount === "number") {
+      estimated_fare_formatted = String(amount);
+    }
+
     const etaUnix = slot.eta;
     const eta_minutes = typeof etaUnix === "number"
       ? Math.max(0, Math.round((etaUnix - nowSec) / 60))
       : null;
 
-   return sendVapiOrSimple(res, toolCallId, {
-  success: true,
-  pickup_address: p.formatted,
-  destination_address: d.formatted,
-  estimated_fare_amount: amount,                 // raw
-  estimated_fare_formatted,                      // string exacto para leer
-  currency,
-  eta_minutes
-}, 200);
+    // ✅ IMPORTANT: Provide a single speakable field and DO NOT return the raw amount.
+    const fare_speak = estimated_fare_formatted;
+
+    return sendVapiOrSimple(res, toolCallId, {
+      success: true,
+      pickup_address: p.formatted,
+      destination_address: d.formatted,
+      currency,
+      eta_minutes,
+      fare_speak,
+      estimated_fare_formatted
+      // ❌ removed: estimated_fare_amount
+    }, 200);
+
   } catch (e) {
     return sendVapiOrSimple(
       res,
