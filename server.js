@@ -529,10 +529,25 @@ app.post("/create-booking", async (req, res) => {
 
     const phoneKey = String(customer_phone || "").trim();
     if (phoneKey) {
-      lastOrderByPhone.set(phoneKey, { orderId: result.booking_id, createdAtMs: Date.now() });
+      // NEW: geocode pickup and store coords for ETA computations
+      let pickup = null;
+      try {
+        const pickupGeo = await geocodeAddress(pickup_address);
+        pickup = { lat: pickupGeo.lat, lng: pickupGeo.lng };
+      } catch (e) {
+        console.warn("[create-booking] geocode pickup failed", String(e?.message || e));
+      }
+
+      lastOrderByPhone.set(phoneKey, {
+        orderId: result.booking_id,
+        createdAtMs: Date.now(),
+        pickup // may be null if geocode failed
+      });
+
       console.log("[create-booking] saved lastOrderByPhone", {
         phone: maskPhone(phoneKey),
-        orderId: result.booking_id
+        orderId: result.booking_id,
+        hasPickup: !!pickup
       });
     }
   }
@@ -653,6 +668,154 @@ app.post("/cancel-booking", async (req, res) => {
       res,
       toolCallId,
       { success: false, error: String(e?.message || e) },
+      200
+    );
+  }
+});
+/**
+ * =========================
+ * /get-booking-eta (by order_id OR caller_phone)
+ * =========================
+ * Accepts:
+ * - Direct JSON: { order_id?, caller_phone? }
+ * - Vapi tool-calls payload
+ *
+ * Behavior:
+ * - If order_id is provided: checks that order
+ * - Else if caller_phone provided: resolves most recent booking within TTL
+ * - Calls TaxiCaller track -> if vehicle.pos exists, compute ETA minutes (vehicle -> pickup) via Google Routes
+ * - If no vehicle.pos yet, returns status "not_assigned"
+ */
+app.post("/get-booking-eta", async (req, res) => {
+  let body;
+  try {
+    body = parseBodyOnce(req);
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_JSON_BODY",
+      message: String(e?.message || e)
+    });
+  }
+
+  const { toolCallId, args } = extractVapiToolCall(body);
+  const input = toolCallId ? args : body;
+
+  const caller_phone = String(input?.caller_phone || "").trim();
+  let order_id = String(input?.order_id || "").trim();
+
+  // Resolve by phone (most recent order within TTL)
+  let rec = null;
+  if (!order_id && caller_phone) {
+    rec = lastOrderByPhone.get(caller_phone);
+
+    if (!rec) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "No recent booking found for this phone number" },
+        200
+      );
+    }
+
+    const ageMs = Date.now() - rec.createdAtMs;
+    if (ageMs > LAST_ORDER_TTL_MS) {
+      lastOrderByPhone.delete(caller_phone);
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "Last booking for this phone number is too old to check ETA automatically" },
+        200
+      );
+    }
+
+    order_id = rec.orderId;
+  } else if (caller_phone) {
+    rec = lastOrderByPhone.get(caller_phone) || null;
+  }
+
+  if (!order_id) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: "Missing order_id or caller_phone" },
+      200
+    );
+  }
+
+  const pickup = rec?.pickup;
+  if (!pickup) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      {
+        success: false,
+        order_id,
+        error: "Missing pickup coords in cache. Save pickup lat/lng during create-booking."
+      },
+      200
+    );
+  }
+
+  try {
+    requireOfficialEnv();
+    const jwt = await getOfficialTaxiCallerJwt();
+
+    const url = joinUrl(
+      TAXICALLER_OFFICIAL_API_BASE_URL,
+      `/api/v1/booker/order/${encodeURIComponent(order_id)}/track`
+    );
+
+    const tcRes = await fetch(url, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${jwt}`
+      }
+    });
+
+    const text = await tcRes.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+
+    if (!tcRes.ok) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: `Track error ${tcRes.status}`, data },
+        200
+      );
+    }
+
+    const pos = data?.track?.vehicle?.pos;
+    if (!pos) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: true, order_id, status: "not_assigned" },
+        200
+      );
+    }
+
+    const vehicleLatLng = tcPosToLatLng(pos);
+    const eta_minutes = await computeEtaMinutesGoogleRoutes(vehicleLatLng, pickup);
+
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: true, order_id, status: "en_route", eta_minutes },
+      200
+    );
+  } catch (e) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, order_id, error: String(e?.message || e) },
       200
     );
   }
@@ -1204,6 +1367,218 @@ app.post("/fare-estimate", async (req, res) => {
     );
   }
 });
+/**
+ * =========================
+ * ETA helpers
+ * =========================
+ */
+
+function tcPosToLatLng(pos) {
+  // TaxiCaller pos: [lngE6, latE6]
+  const [lngE6, latE6] = pos;
+  return { lat: latE6 / 1e6, lng: lngE6 / 1e6 };
+}
+
+async function geocodeAddress(address) {
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key) throw new Error("Missing GOOGLE_MAPS_API_KEY");
+
+  const url =
+    "https://maps.googleapis.com/maps/api/geocode/json?address=" +
+    encodeURIComponent(address) +
+    "&key=" +
+    encodeURIComponent(key);
+
+  const r = await fetch(url);
+  const data = await r.json();
+
+  if (!r.ok || data.status !== "OK" || !data.results?.[0]) {
+    throw new Error(`Geocode failed: ${data.status || r.status}`);
+  }
+
+  const loc = data.results[0].geometry.location;
+  return { lat: loc.lat, lng: loc.lng, formattedAddress: data.results[0].formatted_address };
+}
+
+async function computeEtaMinutesGoogleRoutes(origin, destination) {
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key) throw new Error("Missing GOOGLE_MAPS_API_KEY");
+
+  const r = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": key,
+      "X-Goog-FieldMask": "routes.duration"
+    },
+    body: JSON.stringify({
+      origin: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
+      destination: { location: { latLng: { latitude: destination.lat, longitude: destination.lng } } },
+      routingPreference: "TRAFFIC_AWARE"
+    })
+  });
+
+  const data = await r.json();
+  if (!r.ok || !data.routes?.[0]?.duration) {
+    throw new Error(`Routes failed: ${r.status} ${JSON.stringify(data)}`);
+  }
+
+  // duration e.g. "123s"
+  const seconds = parseInt(String(data.routes[0].duration).replace("s", ""), 10);
+  return Math.max(1, Math.round(seconds / 60));
+}
+
+/**
+ * =========================
+ * /get-booking-eta (by order_id OR caller_phone)
+ * =========================
+ * Accepts:
+ * - Direct JSON: { order_id?, caller_phone? }
+ * - Vapi tool-calls payload
+ *
+ * Behavior:
+ * - Resolves order_id by caller_phone using lastOrderByPhone (TTL)
+ * - Pulls TaxiCaller track -> if vehicle.pos exists, computes ETA (vehicle -> pickup) via Google Routes
+ * - If no vehicle.pos yet, returns status "not_assigned"
+ *
+ * Requires:
+ * - lastOrderByPhone must store pickup coords: { pickup: {lat,lng} }
+ */
+app.post("/get-booking-eta", async (req, res) => {
+  let body;
+  try {
+    body = parseBodyOnce(req);
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_JSON_BODY",
+      message: String(e?.message || e)
+    });
+  }
+
+  const { toolCallId, args } = extractVapiToolCall(body);
+  const input = toolCallId ? args : body;
+
+  const caller_phone = String(input?.caller_phone || "").trim();
+  let order_id = String(input?.order_id || "").trim();
+
+  // Resolve by phone (most recent order within TTL)
+  let rec = null;
+  if (!order_id && caller_phone) {
+    rec = lastOrderByPhone.get(caller_phone);
+
+    if (!rec) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "No recent booking found for this phone number" },
+        200
+      );
+    }
+
+    const ageMs = Date.now() - rec.createdAtMs;
+    if (ageMs > LAST_ORDER_TTL_MS) {
+      lastOrderByPhone.delete(caller_phone);
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: "Last booking for this phone number is too old to check ETA automatically" },
+        200
+      );
+    }
+
+    order_id = rec.orderId;
+  } else if (caller_phone) {
+    rec = lastOrderByPhone.get(caller_phone) || null;
+  }
+
+  if (!order_id) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, error: "Missing order_id or caller_phone" },
+      200
+    );
+  }
+
+  const pickup = rec?.pickup;
+  if (!pickup) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      {
+        success: false,
+        order_id,
+        error: "Missing pickup coords in cache. Save pickup lat/lng during create-booking."
+      },
+      200
+    );
+  }
+
+  try {
+    requireOfficialEnv();
+    const jwt = await getOfficialTaxiCallerJwt();
+
+    const url = joinUrl(
+      TAXICALLER_OFFICIAL_API_BASE_URL,
+      `/api/v1/booker/order/${encodeURIComponent(order_id)}/track`
+    );
+
+    const tcRes = await fetch(url, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${jwt}`
+      }
+    });
+
+    const text = await tcRes.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+
+    if (!tcRes.ok) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: false, error: `Track error ${tcRes.status}`, data },
+        200
+      );
+    }
+
+    const pos = data?.track?.vehicle?.pos;
+    if (!pos) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        { success: true, order_id, status: "not_assigned" },
+        200
+      );
+    }
+
+    const vehicleLatLng = tcPosToLatLng(pos);
+    const eta_minutes = await computeEtaMinutesGoogleRoutes(vehicleLatLng, pickup);
+
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: true, order_id, status: "en_route", eta_minutes },
+      200
+    );
+  } catch (e) {
+    return sendVapiOrSimple(
+      res,
+      toolCallId,
+      { success: false, order_id, error: String(e?.message || e) },
+      200
+    );
+  }
+});
+
 /**
  * =========================
  * START SERVER
