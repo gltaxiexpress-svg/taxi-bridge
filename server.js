@@ -459,24 +459,38 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
 app.get("/routes-check", (_req, res) => {
   return res.status(200).json({
     ok: true,
-    routes: ["/routes-check", "/taxicaller/official-jwt-check", "/create-booking"]
+    routes: [
+      "/routes-check",
+      "/taxicaller/official-jwt-check",
+      "/create-booking"
+    ]
   });
 });
 
-app.get("/taxicaller/official-jwt-check", requireProbeSecret, async (_req, res) => {
-  try {
-    const token = await getOfficialTaxiCallerJwt();
-    return res.status(200).json({
-      ok: true,
-      hasToken: Boolean(token),
-      tokenPreview: token ? redact(token) : null,
-      expiresAtMs: officialJwtCache.expiresAtMs
-    });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
+app.get(
+  "/taxicaller/official-jwt-check",
+  requireProbeSecret,
+  async (_req, res) => {
+    try {
+      const token = await getOfficialTaxiCallerJwt();
 
+      return res.status(200).json({
+        ok: true,
+        hasToken: Boolean(token),
+        expiresAtMs: officialJwtCache.expiresAtMs
+      });
+    } catch (e) {
+      console.error("[OFFICIAL JWT CHECK] failed", {
+        message: String(e?.message || e)
+      });
+
+      return res.status(503).json({
+        ok: false,
+        error: "TaxiCaller JWT service unavailable"
+      });
+    }
+  }
+);
 /**
  * =========================
  * /create-booking
