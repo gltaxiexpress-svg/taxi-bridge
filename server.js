@@ -231,12 +231,17 @@ async function directions(from, to) {
  */
 const OFFICIAL_JWT_RENEW_EARLY_SECONDS = 120;
 let officialJwtCache = { token: null, expiresAtMs: 0 };
+
 const lastOrderByPhone = new Map(); // phone -> { orderId, createdAtMs }
 const LAST_ORDER_TTL_MS = 60 * 60 * 1000; // 60 minutes
 
 function clampTtl(ttl) {
   const n = Number(ttl);
-  if (!Number.isFinite(n)) return 900;
+
+  if (!Number.isFinite(n)) {
+    return 900;
+  }
+
   return Math.max(60, Math.min(900, n));
 }
 
@@ -249,54 +254,114 @@ async function generateOfficialTaxiCallerJwt({
   const ttl = clampTtl(ttlSeconds);
   const key = String(TAXICALLER_API_KEY || "").trim();
 
-  const base = joinUrl(TAXICALLER_OFFICIAL_API_BASE_URL, "/api/v1/jwt/for-key");
+  const base = joinUrl(
+    TAXICALLER_OFFICIAL_API_BASE_URL,
+    "/api/v1/jwt/for-key"
+  );
 
-  // Real URL contains real key — DO NOT log.
-  const qs = new URLSearchParams({ key, sub, ttl: String(ttl) }).toString();
+  const qs = new URLSearchParams({
+    key,
+    sub,
+    ttl: String(ttl)
+  }).toString();
+
   const url = `${base}?${qs}`;
 
-  // Safe log
-  const safeQs = new URLSearchParams({ key: redact(key), sub, ttl: String(ttl) }).toString();
-  console.log("[OFFICIAL JWT] request", { method: "GET", url: `${base}?${safeQs}` });
-
-  const res = await fetch(url, { method: "GET" });
-  const text = await res.text();
-
-  console.log("[OFFICIAL JWT] response", {
-    status: res.status,
-    ok: res.ok,
-    contentType: res.headers.get("content-type"),
-    bodyPreview: text.slice(0, 240)
+  // Never log the API key or the complete request URL.
+  console.log("[OFFICIAL JWT] request", {
+    method: "GET",
+    endpoint: base,
+    sub,
+    ttl
   });
 
-  if (!res.ok) throw new Error(`Official JWT error ${res.status}: ${text.slice(0, 400)}`);
+  const response = await fetch(url, {
+    method: "GET"
+  });
+
+  const contentType = response.headers.get("content-type") || "";
+  const text = await response.text();
+
+  if (!response.ok) {
+    let providerMessage = null;
+    let providerRetcode = null;
+
+    try {
+      const errorData = JSON.parse(text);
+      providerMessage =
+        typeof errorData?.message === "string"
+          ? errorData.message
+          : null;
+      providerRetcode =
+        errorData?.retcode !== undefined
+          ? errorData.retcode
+          : null;
+    } catch {
+      // Do not log or expose the raw provider response.
+    }
+
+    console.error("[OFFICIAL JWT] failed", {
+      status: response.status,
+      contentType,
+      providerMessage,
+      providerRetcode
+    });
+
+    throw new Error(
+      `Official JWT error ${response.status}${
+        providerMessage ? `: ${providerMessage}` : ""
+      }`
+    );
+  }
+
+  console.log("[OFFICIAL JWT] response", {
+    status: response.status,
+    ok: response.ok,
+    contentType
+  });
 
   let data;
+
   try {
     data = JSON.parse(text);
   } catch {
-    data = { raw: text };
+    throw new Error("Official JWT returned an invalid JSON response");
   }
 
-  const token = data?.token ?? null;
-  if (!token || typeof token !== "string") {
-    throw new Error(`Official JWT missing token. Response preview: ${safeJsonSnippet(data, 400)}`);
+  const token =
+    typeof data?.token === "string"
+      ? data.token.trim()
+      : "";
+
+  if (!token) {
+    throw new Error("Official JWT response did not include a valid token");
   }
 
   officialJwtCache.token = token;
   officialJwtCache.expiresAtMs = Date.now() + ttl * 1000;
 
-  console.log("[OFFICIAL JWT] generated", { expiresInSeconds: ttl });
+  console.log("[OFFICIAL JWT] generated", {
+    expiresInSeconds: ttl
+  });
+
   return token;
 }
 
 async function getOfficialTaxiCallerJwt() {
   const now = Date.now();
-  const renewAtMs = officialJwtCache.expiresAtMs - OFFICIAL_JWT_RENEW_EARLY_SECONDS * 1000;
 
-  if (officialJwtCache.token && now < renewAtMs) return officialJwtCache.token;
+  const renewAtMs =
+    officialJwtCache.expiresAtMs -
+    OFFICIAL_JWT_RENEW_EARLY_SECONDS * 1000;
 
-  return await generateOfficialTaxiCallerJwt({
+  if (
+    officialJwtCache.token &&
+    now < renewAtMs
+  ) {
+    return officialJwtCache.token;
+  }
+
+  return generateOfficialTaxiCallerJwt({
     sub: TAXICALLER_OFFICIAL_JWT_SUBJECT,
     ttlSeconds: TAXICALLER_OFFICIAL_JWT_TTL_SECONDS
   });
