@@ -368,6 +368,79 @@ async function getOfficialTaxiCallerJwt() {
 }
 /**
  * =========================
+ * OFFICIAL AUTO ASSIGN
+ * =========================
+ */
+async function autoAssignBookerOrderOfficial({ orderId, jwt }) {
+  if (!orderId) {
+    throw new Error("Missing orderId for TaxiCaller Auto Dispatch");
+  }
+
+  if (!jwt) {
+    throw new Error("Missing JWT for TaxiCaller Auto Dispatch");
+  }
+
+  const url = joinUrl(
+    TAXICALLER_OFFICIAL_API_BASE_URL,
+    `/api/v1/booker/order/${encodeURIComponent(orderId)}/assign`
+  );
+
+  console.log("[OFFICIAL ASSIGN] request", {
+    method: "POST",
+    endpoint: url,
+    orderId: String(orderId),
+    vehicleId: 0,
+    autoAssign: true
+  });
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      authorization: `Bearer ${jwt}`
+    },
+    body: JSON.stringify({
+      vehicle_id: 0,
+      auto_assign: true
+    })
+  });
+
+  const contentType = response.headers.get("content-type") || "";
+  const text = await response.text();
+
+  let data = {};
+
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { invalidJsonResponse: true };
+    }
+  }
+
+  console.log("[OFFICIAL ASSIGN] response", {
+    status: response.status,
+    ok: response.ok,
+    contentType,
+    orderId: String(orderId)
+  });
+
+  if (!response.ok) {
+    const providerMessage =
+      typeof data?.message === "string" ? data.message : null;
+
+    throw new Error(
+      `TaxiCaller Auto Dispatch error ${response.status}${
+        providerMessage ? `: ${providerMessage}` : ""
+      }`
+    );
+  }
+
+  return data;
+}
+/**
+ * =========================
  * BOOKER PAYLOAD + CREATE ORDER
  * =========================
  */
@@ -510,11 +583,50 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
   }
 
   const bookingId = data?.order?.order_id ?? null;
+
   if (!bookingId) {
-    return { success: false, error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}` };
+    return {
+      success: false,
+      error: `Missing response.order.order_id. Response preview: ${safeJsonSnippet(data, 800)}`
+    };
   }
 
-  return { success: true, booking_id: String(bookingId), eta: "Soon" };
+  try {
+    const assignment = await autoAssignBookerOrderOfficial({
+      orderId: bookingId,
+      jwt
+    });
+
+    console.log("[OFFICIAL BOOKER] Auto Dispatch started", {
+      orderId: String(bookingId)
+    });
+
+    return {
+      success: true,
+      booking_id: String(bookingId),
+      auto_dispatch_started: true,
+      assignment,
+      eta: "Soon"
+    };
+  } catch (error) {
+    console.error(
+      "[OFFICIAL ASSIGN] booking created but Auto Dispatch failed",
+      {
+        orderId: String(bookingId),
+        message: String(error?.message || error)
+      }
+    );
+
+    // La reserva ya fue creada. No se debe volver a crear porque
+    // podría generar un viaje duplicado.
+    return {
+      success: true,
+      booking_id: String(bookingId),
+      auto_dispatch_started: false,
+      warning: String(error?.message || error),
+      eta: "Soon"
+    };
+  }
 }
 /**
  * =========================
@@ -1287,7 +1399,7 @@ app.post("/fare-estimate", async (req, res) => {
             "@type": "passengers",
             seq: 0,
             passenger: {
-              name: "Sarah Johnson",
+              name: "Caller",
               phone: customer_phone,
               email: null
             },
