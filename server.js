@@ -13,7 +13,7 @@
  */
 
 import express from "express";
-
+import { createClient } from "@supabase/supabase-js";
 console.log("BOOT:", new Date().toISOString());
 
 const app = express();
@@ -33,6 +33,44 @@ app.use(express.text({ type: "*/*", limit: "2mb" }));
  * =========================
  */
 const PROBE_SECRET = String(process.env.PROBE_SECRET || "");
+const SUPABASE_URL = String(
+  process.env.SUPABASE_URL || ""
+).replace(/\/+$/, "");
+
+const SUPABASE_SERVICE_ROLE_KEY = String(
+  process.env.SUPABASE_SERVICE_ROLE_KEY || ""
+);
+
+const MEMORY_ENABLED =
+  String(process.env.MEMORY_ENABLED || "false").toLowerCase() === "true";
+
+let supabaseAdmin = null;
+
+function getSupabaseAdmin() {
+  if (supabaseAdmin) return supabaseAdmin;
+
+  if (!SUPABASE_URL) {
+    throw new Error("Missing env var: SUPABASE_URL");
+  }
+
+  if (!SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("Missing env var: SUPABASE_SERVICE_ROLE_KEY");
+  }
+
+  supabaseAdmin = createClient(
+    SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY,
+    {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false
+      }
+    }
+  );
+
+  return supabaseAdmin;
+}
 
 const GOOGLE_MAPS_API_KEY = String(process.env.GOOGLE_MAPS_API_KEY || "");
 
@@ -633,11 +671,52 @@ async function createBookerOrderOfficial({ pickup_address, destination_address, 
  * ROUTES
  * =========================
  */
+app.get(
+  "/memory-health",
+  requireProbeSecret,
+  async (_req, res) => {
+    try {
+      const supabase = getSupabaseAdmin();
+
+      const { count, error } = await supabase
+        .from("customers")
+        .select("id", {
+          count: "exact",
+          head: true
+        });
+
+      if (error) {
+        throw error;
+      }
+
+      return res.status(200).json({
+        ok: true,
+        configured: true,
+        enabled: MEMORY_ENABLED,
+        customerCount: count ?? 0
+      });
+    } catch (error) {
+      console.error("[MEMORY HEALTH] failed", {
+        message: String(error?.message || error)
+      });
+
+      return res.status(503).json({
+        ok: false,
+        configured: Boolean(
+          SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+        ),
+        enabled: MEMORY_ENABLED,
+        error: "Supabase memory unavailable"
+      });
+    }
+  }
+);
 app.get("/routes-check", (_req, res) => {
   return res.status(200).json({
     ok: true,
     routes: [
       "/routes-check",
+      "/memory-health",
       "/taxicaller/official-jwt-check",
       "/create-booking"
     ]
