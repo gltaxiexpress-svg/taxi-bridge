@@ -717,6 +717,7 @@ app.get("/routes-check", (_req, res) => {
     routes: [
       "/routes-check",
       "/memory-health",
+      "/customer-memory",
       "/taxicaller/official-jwt-check",
       "/create-booking"
     ]
@@ -1989,6 +1990,211 @@ app.post("/get-booking-eta", async (req, res) => {
     );
   }
 });
+
+/**
+ * =========================
+ * /customer-memory
+ * =========================
+ * Consulta el último viaje confirmado por teléfono.
+ * Protegido mediante x-probe-secret.
+ */
+app.post(
+  "/customer-memory",
+  requireProbeSecret,
+  async (req, res) => {
+    let body;
+
+    try {
+      body = parseBodyOnce(req);
+    } catch (error) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_JSON_BODY",
+        message: String(error?.message || error)
+      });
+    }
+
+    const { toolCallId, args } =
+      extractVapiToolCall(body);
+
+    const input = toolCallId ? args : body;
+
+    const caller_phone = String(
+      input?.caller_phone ||
+      input?.customer_phone ||
+      input?.phone ||
+      ""
+    ).trim();
+
+    if (!isLikelyE164(caller_phone)) {
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        {
+          success: false,
+          found: false,
+          error: "Phone must be E.164"
+        },
+        200
+      );
+    }
+
+    try {
+      const supabase = getSupabaseAdmin();
+
+      const {
+        data: customer,
+        error: customerError
+      } = await supabase
+        .from("customers")
+        .select("id")
+        .eq("phone_e164", caller_phone)
+        .maybeSingle();
+
+      if (customerError) {
+        throw customerError;
+      }
+
+      if (!customer) {
+        return sendVapiOrSimple(
+          res,
+          toolCallId,
+          {
+            success: true,
+            found: false,
+            last_trip: null
+          },
+          200
+        );
+      }
+
+      const {
+        data: trips,
+        error: tripError
+      } = await supabase
+        .from("trips")
+        .select(
+          [
+            "external_booking_id",
+            "pickup_address_id",
+            "destination_address_id",
+            "created_at"
+          ].join(",")
+        )
+        .eq("customer_id", customer.id)
+        .eq("status", "confirmed")
+        .order("created_at", {
+          ascending: false
+        })
+        .limit(1);
+
+      if (tripError) {
+        throw tripError;
+      }
+
+      const lastTrip = trips?.[0] || null;
+
+      if (!lastTrip) {
+        return sendVapiOrSimple(
+          res,
+          toolCallId,
+          {
+            success: true,
+            found: true,
+            last_trip: null
+          },
+          200
+        );
+      }
+
+      const addressIds = [
+        lastTrip.pickup_address_id,
+        lastTrip.destination_address_id
+      ].filter(Boolean);
+
+      const {
+        data: addresses,
+        error: addressError
+      } = await supabase
+        .from("addresses")
+        .select(
+          "id,address_text,lat,lon"
+        )
+        .in("id", addressIds);
+
+      if (addressError) {
+        throw addressError;
+      }
+
+      const addressById = new Map(
+        (addresses || []).map((address) => [
+          address.id,
+          address
+        ])
+      );
+
+      const pickup = addressById.get(
+        lastTrip.pickup_address_id
+      );
+
+      const destination = addressById.get(
+        lastTrip.destination_address_id
+      );
+
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        {
+          success: true,
+          found: true,
+          last_trip: {
+            booking_id:
+              lastTrip.external_booking_id,
+            created_at:
+              lastTrip.created_at,
+            pickup: pickup
+              ? {
+                  address: pickup.address_text,
+                  lat: pickup.lat,
+                  lon: pickup.lon
+                }
+              : null,
+            destination: destination
+              ? {
+                  address:
+                    destination.address_text,
+                  lat: destination.lat,
+                  lon: destination.lon
+                }
+              : null
+          }
+        },
+        200
+      );
+    } catch (error) {
+      console.error(
+        "[CUSTOMER MEMORY] lookup failed",
+        {
+          phone: maskPhone(caller_phone),
+          message: String(
+            error?.message || error
+          )
+        }
+      );
+
+      return sendVapiOrSimple(
+        res,
+        toolCallId,
+        {
+          success: false,
+          found: false,
+          error: "Customer memory unavailable"
+        },
+        200
+      );
+    }
+  }
+);
 
 /**
  * =========================
