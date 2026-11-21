@@ -760,24 +760,47 @@ app.get(
  */
 app.post("/create-booking", async (req, res) => {
   let body;
+
   try {
     body = parseBodyOnce(req);
-  } catch (e) {
+  } catch (error) {
     return res.status(400).json({
       ok: false,
       error: "INVALID_JSON_BODY",
-      message: String(e?.message || e)
+      message: String(error?.message || error)
     });
   }
 
   const { toolCallId, args } = extractVapiToolCall(body);
   const input = toolCallId ? args : body;
 
-  // ---- flujo normal de create_booking ----
-  const pickup_address = String(input?.pickup_address || "").trim();
-  const destination_address = String(input?.destination_address || "").trim();
-  const customer_phone = String(input?.customer_phone || "").trim();
-  const notes = input?.notes != null ? String(input.notes) : "";
+  const pickup_address = String(
+    input?.pickup_address || ""
+  ).trim();
+
+  // Compatibilidad con los dos nombres usados por las herramientas.
+  const destination_address = String(
+    input?.destination_address ||
+    input?.dropoff_address ||
+    ""
+  ).trim();
+
+  const customer_phone = String(
+    input?.customer_phone ||
+    input?.caller_phone ||
+    ""
+  ).trim();
+
+  const notes =
+    input?.notes != null
+      ? String(input.notes)
+      : "";
+
+  const vapiCallId = String(
+    body?.message?.call?.id ||
+    input?.vapi_call_id ||
+    ""
+  ).trim();
 
   console.log("[/create-booking] input", {
     pickup_address,
@@ -787,42 +810,159 @@ app.post("/create-booking", async (req, res) => {
     toolCallId: toolCallId || null
   });
 
-  const result = await createBookerOrderOfficial({
-    pickup_address,
-    destination_address,
-    customer_phone,
-    notes
-  });
+  let result;
+
+  try {
+    result = await createBookerOrderOfficial({
+      pickup_address,
+      destination_address,
+      customer_phone,
+      notes
+    });
+  } catch (error) {
+    console.error("[create-booking] failed", {
+      message: String(error?.message || error)
+    });
+
+    result = {
+      success: false,
+      error: "Booking service unavailable"
+    };
+  }
 
   if (result.success) {
-    console.log("[create-booking] booking_id", result.booking_id);
+    console.log(
+      "[create-booking] booking_id",
+      result.booking_id
+    );
 
-    const phoneKey = String(customer_phone || "").trim();
+    const phoneKey = customer_phone;
+    let pickupGeo = null;
+
+    /*
+     * Mantener la última reservación en memoria permite que las
+     * rutas actuales de ETA, estado y seguimiento sigan funcionando.
+     */
     if (phoneKey) {
-      // NEW: geocode pickup and store coords for ETA computations
-      let pickup = null;
       try {
-        const pickupGeo = await geocodeAddress(pickup_address);
-        pickup = { lat: pickupGeo.lat, lng: pickupGeo.lng };
-      } catch (e) {
-        console.warn("[create-booking] geocode pickup failed", String(e?.message || e));
+        pickupGeo = await geocodeAddress(
+          pickup_address
+        );
+      } catch (error) {
+        console.warn(
+          "[create-booking] geocode pickup failed",
+          String(error?.message || error)
+        );
       }
+
+      const pickup = pickupGeo
+        ? {
+            lat: pickupGeo.lat,
+            lng: pickupGeo.lng
+          }
+        : null;
 
       lastOrderByPhone.set(phoneKey, {
         orderId: result.booking_id,
         createdAtMs: Date.now(),
-        pickup // may be null if geocode failed
+        pickup
       });
 
-      console.log("[create-booking] saved lastOrderByPhone", {
-        phone: maskPhone(phoneKey),
-        orderId: result.booking_id,
-        hasPickup: !!pickup
-      });
+      console.log(
+        "[create-booking] saved lastOrderByPhone",
+        {
+          phone: maskPhone(phoneKey),
+          orderId: result.booking_id,
+          hasPickup: Boolean(pickup)
+        }
+      );
+    }
+
+    /*
+     * Guardar únicamente después de que TaxiCaller haya confirmado
+     * la creación de la reservación.
+     *
+     * Mientras MEMORY_ENABLED=false, este bloque no se ejecutará.
+     */
+    if (MEMORY_ENABLED) {
+      try {
+        if (!pickupGeo) {
+          pickupGeo = await geocodeAddress(
+            pickup_address
+          );
+        }
+
+        const destinationGeo =
+          await geocodeAddress(destination_address);
+
+        const supabase = getSupabaseAdmin();
+
+        const {
+          data: memoryData,
+          error: memoryError
+        } = await supabase.rpc(
+          "record_confirmed_trip",
+          {
+            p_phone_e164: customer_phone,
+            p_pickup_address:
+              pickupGeo.formattedAddress,
+            p_pickup_lat:
+              pickupGeo.lat,
+            p_pickup_lon:
+              pickupGeo.lng,
+            p_destination_address:
+              destinationGeo.formattedAddress,
+            p_destination_lat:
+              destinationGeo.lat,
+            p_destination_lon:
+              destinationGeo.lng,
+            p_external_booking_id:
+              String(result.booking_id),
+            p_vapi_call_id:
+              vapiCallId || null
+          }
+        );
+
+        if (memoryError) {
+          throw new Error(
+            `Supabase RPC failed: ${memoryError.message}`
+          );
+        }
+
+        result.memory_saved = true;
+
+        console.log("[MEMORY] confirmed trip saved", {
+          phone: maskPhone(customer_phone),
+          bookingId: result.booking_id,
+          duplicate: Boolean(
+            memoryData?.duplicate
+          )
+        });
+      } catch (error) {
+        /*
+         * La reserva ya existe en TaxiCaller. Un error al guardar
+         * memoria nunca debe convertirla en fallida ni provocar
+         * un nuevo intento que pudiera duplicar el viaje.
+         */
+        result.memory_saved = false;
+
+        console.error("[MEMORY] save failed", {
+          phone: maskPhone(customer_phone),
+          bookingId: result.booking_id,
+          message: String(
+            error?.message || error
+          )
+        });
+      }
     }
   }
 
-  return sendVapiOrSimple(res, toolCallId, result, 200);
+  return sendVapiOrSimple(
+    res,
+    toolCallId,
+    result,
+    200
+  );
 });
 /**
  * =========================
@@ -1819,6 +1959,7 @@ app.post("/get-booking-eta", async (req, res) => {
         200
       );
     }
+
 
     const pos = data?.track?.vehicle?.pos;
     if (!pos) {
