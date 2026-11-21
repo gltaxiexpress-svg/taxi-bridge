@@ -1993,7 +1993,7 @@ app.post("/get-booking-eta", async (req, res) => {
  * =========================
  * /customer-memory
  * =========================
- * Consulta el último viaje confirmado por teléfono.
+ * Consulta hasta los últimos 8 viajes confirmados por teléfono.
  * Protegido mediante x-probe-secret.
  */
 app.post(
@@ -2035,6 +2035,8 @@ app.post(
         {
           success: false,
           found: false,
+          last_trip: null,
+          recent_trips: [],
           error: "Phone must be E.164"
         },
         200
@@ -2067,7 +2069,8 @@ app.post(
           {
             success: true,
             found: false,
-            last_trip: null
+            last_trip: null,
+            recent_trips: []
           },
           200
         );
@@ -2100,93 +2103,127 @@ app.post(
             ascending: false
           }
         )
-        .limit(1);
+        .limit(8);
 
       if (tripError) {
         throw tripError;
       }
 
-      const lastTrip =
-        trips?.[0] || null;
+      const confirmedTrips =
+        Array.isArray(trips)
+          ? trips
+          : [];
 
-      if (!lastTrip) {
+      if (confirmedTrips.length === 0) {
         return sendVapiOrSimple(
           res,
           toolCallId,
           {
             success: true,
             found: true,
-            last_trip: null
+            last_trip: null,
+            recent_trips: []
           },
           200
         );
       }
 
       const locationIds = [
-        lastTrip.pickup_location_id,
-        lastTrip.destination_location_id
-      ].filter(Boolean);
-
-      if (locationIds.length === 0) {
-        return sendVapiOrSimple(
-          res,
-          toolCallId,
-          {
-            success: true,
-            found: true,
-            last_trip: {
-              booking_id:
-                lastTrip.external_booking_id,
-              created_at:
-                lastTrip.created_at,
-              pickup: null,
-              destination: null
-            }
-          },
-          200
-        );
-      }
-
-      const {
-        data: locations,
-        error: locationError
-      } = await supabase
-        .from("customer_locations")
-        .select(
-          [
-            "id",
-            "formatted_address",
-            "latitude",
-            "longitude"
-          ].join(",")
+        ...new Set(
+          confirmedTrips
+            .flatMap((trip) => [
+              trip.pickup_location_id,
+              trip.destination_location_id
+            ])
+            .filter(Boolean)
         )
-        .in(
-          "id",
-          locationIds
-        );
+      ];
 
-      if (locationError) {
-        throw locationError;
+      let locations = [];
+
+      if (locationIds.length > 0) {
+        const {
+          data: locationData,
+          error: locationError
+        } = await supabase
+          .from("customer_locations")
+          .select(
+            [
+              "id",
+              "formatted_address",
+              "latitude",
+              "longitude"
+            ].join(",")
+          )
+          .in(
+            "id",
+            locationIds
+          );
+
+        if (locationError) {
+          throw locationError;
+        }
+
+        locations =
+          Array.isArray(locationData)
+            ? locationData
+            : [];
       }
 
       const locationById = new Map(
-        (locations || []).map(
-          (location) => [
-            location.id,
-            location
-          ]
-        )
+        locations.map((location) => [
+          location.id,
+          location
+        ])
       );
 
-      const pickup =
-        locationById.get(
-          lastTrip.pickup_location_id
-        );
+      const formatLocation = (
+        locationId
+      ) => {
+        if (!locationId) {
+          return null;
+        }
 
-      const destination =
-        locationById.get(
-          lastTrip.destination_location_id
-        );
+        const location =
+          locationById.get(locationId);
+
+        if (!location) {
+          return null;
+        }
+
+        return {
+          address:
+            location.formatted_address,
+          lat:
+            location.latitude == null
+              ? null
+              : Number(
+                  location.latitude
+                ),
+          lon:
+            location.longitude == null
+              ? null
+              : Number(
+                  location.longitude
+                )
+        };
+      };
+
+      const recentTrips =
+        confirmedTrips.map((trip) => ({
+          booking_id:
+            trip.external_booking_id,
+          created_at:
+            trip.created_at,
+          pickup:
+            formatLocation(
+              trip.pickup_location_id
+            ),
+          destination:
+            formatLocation(
+              trip.destination_location_id
+            )
+        }));
 
       return sendVapiOrSimple(
         res,
@@ -2194,48 +2231,10 @@ app.post(
         {
           success: true,
           found: true,
-          last_trip: {
-            booking_id:
-              lastTrip.external_booking_id,
-            created_at:
-              lastTrip.created_at,
-            pickup: pickup
-              ? {
-                  address:
-                    pickup.formatted_address,
-                  lat:
-                    pickup.latitude == null
-                      ? null
-                      : Number(
-                          pickup.latitude
-                        ),
-                  lon:
-                    pickup.longitude == null
-                      ? null
-                      : Number(
-                          pickup.longitude
-                        )
-                }
-              : null,
-            destination: destination
-              ? {
-                  address:
-                    destination.formatted_address,
-                  lat:
-                    destination.latitude == null
-                      ? null
-                      : Number(
-                          destination.latitude
-                        ),
-                  lon:
-                    destination.longitude == null
-                      ? null
-                      : Number(
-                          destination.longitude
-                        )
-                }
-              : null
-          }
+          last_trip:
+            recentTrips[0] || null,
+          recent_trips:
+            recentTrips
         },
         200
       );
@@ -2258,6 +2257,8 @@ app.post(
         {
           success: false,
           found: false,
+          last_trip: null,
+          recent_trips: [],
           error:
             "Customer memory unavailable"
         },
