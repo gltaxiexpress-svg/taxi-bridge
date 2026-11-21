@@ -143,12 +143,10 @@ function parseBodyOnce(req) {
 
   if (!raw) return {};
 
-  // DIAGNOSTIC: shows what the server actually receives
-  console.log("[parseBodyOnce] rawHead", {
-    len: raw.length,
-    head: raw.slice(0, 80),
-    codes: Array.from(raw.slice(0, 24)).map((c) => c.charCodeAt(0))
-  });
+ // Log only the body length; never log phone numbers or addresses.
+console.log("[parseBodyOnce] received", {
+  len: raw.length
+});
 
   // Remove BOM + leading control characters (0x00-0x1F)
   const cleanedPrefix = raw.replace(/^\uFEFF/, "").replace(/^[\u0000-\u001F]+/, "");
@@ -2010,14 +2008,18 @@ app.post(
       return res.status(400).json({
         ok: false,
         error: "INVALID_JSON_BODY",
-        message: String(error?.message || error)
+        message: String(
+          error?.message || error
+        )
       });
     }
 
     const { toolCallId, args } =
       extractVapiToolCall(body);
 
-    const input = toolCallId ? args : body;
+    const input = toolCallId
+      ? args
+      : body;
 
     const caller_phone = String(
       input?.caller_phone ||
@@ -2048,7 +2050,10 @@ app.post(
       } = await supabase
         .from("customers")
         .select("id")
-        .eq("phone_e164", caller_phone)
+        .eq(
+          "phone_e164",
+          caller_phone
+        )
         .maybeSingle();
 
       if (customerError) {
@@ -2076,23 +2081,33 @@ app.post(
         .select(
           [
             "external_booking_id",
-            "pickup_address_id",
-            "destination_address_id",
+            "pickup_location_id",
+            "destination_location_id",
             "created_at"
           ].join(",")
         )
-        .eq("customer_id", customer.id)
-        .eq("status", "confirmed")
-        .order("created_at", {
-          ascending: false
-        })
+        .eq(
+          "customer_id",
+          customer.id
+        )
+        .eq(
+          "status",
+          "confirmed"
+        )
+        .order(
+          "created_at",
+          {
+            ascending: false
+          }
+        )
         .limit(1);
 
       if (tripError) {
         throw tripError;
       }
 
-      const lastTrip = trips?.[0] || null;
+      const lastTrip =
+        trips?.[0] || null;
 
       if (!lastTrip) {
         return sendVapiOrSimple(
@@ -2107,39 +2122,71 @@ app.post(
         );
       }
 
-      const addressIds = [
-        lastTrip.pickup_address_id,
-        lastTrip.destination_address_id
+      const locationIds = [
+        lastTrip.pickup_location_id,
+        lastTrip.destination_location_id
       ].filter(Boolean);
 
-      const {
-        data: addresses,
-        error: addressError
-      } = await supabase
-        .from("addresses")
-        .select(
-          "id,address_text,lat,lon"
-        )
-        .in("id", addressIds);
-
-      if (addressError) {
-        throw addressError;
+      if (locationIds.length === 0) {
+        return sendVapiOrSimple(
+          res,
+          toolCallId,
+          {
+            success: true,
+            found: true,
+            last_trip: {
+              booking_id:
+                lastTrip.external_booking_id,
+              created_at:
+                lastTrip.created_at,
+              pickup: null,
+              destination: null
+            }
+          },
+          200
+        );
       }
 
-      const addressById = new Map(
-        (addresses || []).map((address) => [
-          address.id,
-          address
-        ])
+      const {
+        data: locations,
+        error: locationError
+      } = await supabase
+        .from("customer_locations")
+        .select(
+          [
+            "id",
+            "formatted_address",
+            "latitude",
+            "longitude"
+          ].join(",")
+        )
+        .in(
+          "id",
+          locationIds
+        );
+
+      if (locationError) {
+        throw locationError;
+      }
+
+      const locationById = new Map(
+        (locations || []).map(
+          (location) => [
+            location.id,
+            location
+          ]
+        )
       );
 
-      const pickup = addressById.get(
-        lastTrip.pickup_address_id
-      );
+      const pickup =
+        locationById.get(
+          lastTrip.pickup_location_id
+        );
 
-      const destination = addressById.get(
-        lastTrip.destination_address_id
-      );
+      const destination =
+        locationById.get(
+          lastTrip.destination_location_id
+        );
 
       return sendVapiOrSimple(
         res,
@@ -2154,17 +2201,38 @@ app.post(
               lastTrip.created_at,
             pickup: pickup
               ? {
-                  address: pickup.address_text,
-                  lat: pickup.lat,
-                  lon: pickup.lon
+                  address:
+                    pickup.formatted_address,
+                  lat:
+                    pickup.latitude == null
+                      ? null
+                      : Number(
+                          pickup.latitude
+                        ),
+                  lon:
+                    pickup.longitude == null
+                      ? null
+                      : Number(
+                          pickup.longitude
+                        )
                 }
               : null,
             destination: destination
               ? {
                   address:
-                    destination.address_text,
-                  lat: destination.lat,
-                  lon: destination.lon
+                    destination.formatted_address,
+                  lat:
+                    destination.latitude == null
+                      ? null
+                      : Number(
+                          destination.latitude
+                        ),
+                  lon:
+                    destination.longitude == null
+                      ? null
+                      : Number(
+                          destination.longitude
+                        )
                 }
               : null
           }
@@ -2175,10 +2243,12 @@ app.post(
       console.error(
         "[CUSTOMER MEMORY] lookup failed",
         {
-          phone: maskPhone(caller_phone),
-          message: String(
-            error?.message || error
-          )
+          phone:
+            maskPhone(caller_phone),
+          message:
+            String(
+              error?.message || error
+            )
         }
       );
 
@@ -2188,14 +2258,14 @@ app.post(
         {
           success: false,
           found: false,
-          error: "Customer memory unavailable"
+          error:
+            "Customer memory unavailable"
         },
         200
       );
     }
   }
 );
-
 /**
  * =========================
  * START SERVER
