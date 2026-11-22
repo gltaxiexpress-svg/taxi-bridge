@@ -2056,7 +2056,8 @@ app.post("/get-booking-eta", async (req, res) => {
  * =========================
  * /customer-memory
  * =========================
- * Consulta hasta los últimos 8 viajes confirmados por teléfono.
+ * Consulta las 8 direcciones únicas más recientes,
+ * derivadas de hasta 25 viajes confirmados.
  * Protegido mediante x-probe-secret.
  */
 app.post(
@@ -2077,8 +2078,10 @@ app.post(
       });
     }
 
-    const { toolCallId, args } =
-      extractVapiToolCall(body);
+    const {
+      toolCallId,
+      args
+    } = extractVapiToolCall(body);
 
     const input = toolCallId
       ? args
@@ -2100,14 +2103,17 @@ app.post(
           found: false,
           last_trip: null,
           recent_trips: [],
-          error: "Phone must be E.164"
+          recent_addresses: [],
+          error:
+            "Phone must be E.164"
         },
         200
       );
     }
 
     try {
-      const supabase = getSupabaseAdmin();
+      const supabase =
+        getSupabaseAdmin();
 
       const {
         data: customer,
@@ -2133,7 +2139,8 @@ app.post(
             success: true,
             found: false,
             last_trip: null,
-            recent_trips: []
+            recent_trips: [],
+            recent_addresses: []
           },
           200
         );
@@ -2166,7 +2173,7 @@ app.post(
             ascending: false
           }
         )
-        .limit(8);
+        .limit(25);
 
       if (tripError) {
         throw tripError;
@@ -2177,7 +2184,9 @@ app.post(
           ? trips
           : [];
 
-      if (confirmedTrips.length === 0) {
+      if (
+        confirmedTrips.length === 0
+      ) {
         return sendVapiOrSimple(
           res,
           toolCallId,
@@ -2185,7 +2194,8 @@ app.post(
             success: true,
             found: true,
             last_trip: null,
-            recent_trips: []
+            recent_trips: [],
+            recent_addresses: []
           },
           200
         );
@@ -2209,7 +2219,9 @@ app.post(
           data: locationData,
           error: locationError
         } = await supabase
-          .from("customer_locations")
+          .from(
+            "customer_locations"
+          )
           .select(
             [
               "id",
@@ -2233,12 +2245,15 @@ app.post(
             : [];
       }
 
-      const locationById = new Map(
-        locations.map((location) => [
-          location.id,
-          location
-        ])
-      );
+      const locationById =
+        new Map(
+          locations.map(
+            (location) => [
+              location.id,
+              location
+            ]
+          )
+        );
 
       const formatLocation = (
         locationId
@@ -2248,7 +2263,9 @@ app.post(
         }
 
         const location =
-          locationById.get(locationId);
+          locationById.get(
+            locationId
+          );
 
         if (!location) {
           return null;
@@ -2257,12 +2274,14 @@ app.post(
         return {
           address:
             location.formatted_address,
+
           lat:
             location.latitude == null
               ? null
               : Number(
                   location.latitude
                 ),
+
           lon:
             location.longitude == null
               ? null
@@ -2272,21 +2291,90 @@ app.post(
         };
       };
 
+      const allTrips =
+        confirmedTrips.map(
+          (trip) => ({
+            booking_id:
+              trip.external_booking_id,
+
+            created_at:
+              trip.created_at,
+
+            pickup:
+              formatLocation(
+                trip.pickup_location_id
+              ),
+
+            destination:
+              formatLocation(
+                trip.destination_location_id
+              )
+          })
+        );
+
       const recentTrips =
-        confirmedTrips.map((trip) => ({
-          booking_id:
-            trip.external_booking_id,
-          created_at:
-            trip.created_at,
-          pickup:
-            formatLocation(
-              trip.pickup_location_id
-            ),
-          destination:
-            formatLocation(
-              trip.destination_location_id
+        allTrips.slice(0, 8);
+
+      const recentAddresses = [];
+      const seenAddresses =
+        new Set();
+
+      for (const trip of allTrips) {
+        const tripLocations = [
+          trip.pickup,
+          trip.destination
+        ];
+
+        for (
+          const location
+          of tripLocations
+        ) {
+          if (
+            !location ||
+            !location.address
+          ) {
+            continue;
+          }
+
+          const normalizedAddress =
+            location.address
+              .trim()
+              .toLowerCase();
+
+          if (
+            seenAddresses.has(
+              normalizedAddress
             )
-        }));
+          ) {
+            continue;
+          }
+
+          seenAddresses.add(
+            normalizedAddress
+          );
+
+          recentAddresses.push({
+            address:
+              location.address,
+            lat:
+              location.lat,
+            lon:
+              location.lon
+          });
+
+          if (
+            recentAddresses.length >= 8
+          ) {
+            break;
+          }
+        }
+
+        if (
+          recentAddresses.length >= 8
+        ) {
+          break;
+        }
+      }
 
       return sendVapiOrSimple(
         res,
@@ -2294,10 +2382,15 @@ app.post(
         {
           success: true,
           found: true,
+
           last_trip:
             recentTrips[0] || null,
+
           recent_trips:
-            recentTrips
+            recentTrips,
+
+          recent_addresses:
+            recentAddresses
         },
         200
       );
@@ -2306,10 +2399,14 @@ app.post(
         "[CUSTOMER MEMORY] lookup failed",
         {
           phone:
-            maskPhone(caller_phone),
+            maskPhone(
+              caller_phone
+            ),
+
           message:
             String(
-              error?.message || error
+              error?.message ||
+              error
             )
         }
       );
@@ -2322,6 +2419,7 @@ app.post(
           found: false,
           last_trip: null,
           recent_trips: [],
+          recent_addresses: [],
           error:
             "Customer memory unavailable"
         },
@@ -2335,5 +2433,15 @@ app.post(
  * START SERVER
  * =========================
  */
-const PORT = Number(process.env.PORT || 3000);
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+const PORT =
+  Number(
+    process.env.PORT || 3000
+  );
+
+app.listen(
+  PORT,
+  () =>
+    console.log(
+      `Listening on ${PORT}`
+    )
+);
