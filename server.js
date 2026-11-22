@@ -214,11 +214,16 @@ function sendVapiOrSimple(
   status = 200
 ) {
   if (toolCallId) {
+    const result =
+      typeof payload === "string"
+        ? payload
+        : JSON.stringify(payload);
+
     return res.status(status).json({
       results: [
         {
           toolCallId,
-          result: payload
+          result
         }
       ]
     });
