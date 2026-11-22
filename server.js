@@ -169,31 +169,89 @@ console.log("[parseBodyOnce] received", {
 }
 
 function extractVapiToolCall(body) {
-  const toolCall = body?.message?.toolCallList?.[0] || null;
-  const toolCallId = toolCall?.id || null;
+  const toolCall =
+    body?.message?.toolCallList?.[0] ||
+    body?.message?.toolCalls?.[0] ||
+    body?.toolCallList?.[0] ||
+    body?.toolCalls?.[0] ||
+    null;
 
-  const argsRaw = toolCall?.function?.arguments;
+  const toolCallId =
+    toolCall?.id || null;
+
+  const argsRaw =
+    toolCall?.function?.arguments;
+
   let args = {};
 
-  if (argsRaw && typeof argsRaw === "object") args = argsRaw;
-  else if (typeof argsRaw === "string") {
-    const cleaned = argsRaw.replace(/^\uFEFF/, "").trim();
-    if (cleaned) args = JSON.parse(cleaned);
+  if (
+    argsRaw &&
+    typeof argsRaw === "object"
+  ) {
+    args = argsRaw;
+  } else if (
+    typeof argsRaw === "string"
+  ) {
+    const cleaned = argsRaw
+      .replace(/^\uFEFF/, "")
+      .trim();
+
+    if (cleaned) {
+      args = JSON.parse(cleaned);
+    }
   }
 
-  return { toolCallId, args };
+  return {
+    toolCallId,
+    args
+  };
 }
 
-function sendVapiOrSimple(res, toolCallId, payload, status = 200) {
-  if (toolCallId) return res.status(status).json({ results: [{ toolCallId, result: payload }] });
-  return res.status(status).json(payload);
+function sendVapiOrSimple(
+  res,
+  toolCallId,
+  payload,
+  status = 200
+) {
+  if (toolCallId) {
+    return res.status(status).json({
+      results: [
+        {
+          toolCallId,
+          result: payload
+        }
+      ]
+    });
+  }
+
+  return res
+    .status(status)
+    .json(payload);
 }
 
-function requireProbeSecret(req, res, next) {
-  if (!PROBE_SECRET) return res.status(500).json({ ok: false, error: "Missing env var: PROBE_SECRET" });
+function requireProbeSecret(
+  req,
+  res,
+  next
+) {
+  if (!PROBE_SECRET) {
+    return res.status(500).json({
+      ok: false,
+      error:
+        "Missing env var: PROBE_SECRET"
+    });
+  }
 
-  const got = String(req.header("x-probe-secret") || "");
-  if (got !== PROBE_SECRET) return res.status(401).json({ ok: false, error: "Unauthorized" });
+  const got = String(
+    req.header("x-probe-secret") || ""
+  );
+
+  if (got !== PROBE_SECRET) {
+    return res.status(401).json({
+      ok: false,
+      error: "Unauthorized"
+    });
+  }
 
   return next();
 }
