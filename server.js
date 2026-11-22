@@ -2430,6 +2430,167 @@ app.post(
 );
 /**
  * =========================
+ * /vapi/assistant-request
+ * =========================
+ * Precarga las direcciones recientes antes de iniciar Sarah.
+ */
+app.post(
+  "/vapi/assistant-request",
+  requireProbeSecret,
+  async (req, res) => {
+    let body;
+
+    try {
+      body = parseBodyOnce(req);
+    } catch (error) {
+      return res.status(400).json({
+        error:
+          "INVALID_JSON_BODY"
+      });
+    }
+
+    if (
+      body?.message?.type !==
+      "assistant-request"
+    ) {
+      return res.status(400).json({
+        error:
+          "Expected assistant-request"
+      });
+    }
+
+    const assistantId = String(
+      process.env
+        .SARAH_ASSISTANT_ID ||
+      ""
+    ).trim();
+
+    if (!assistantId) {
+      return res.status(500).json({
+        error:
+          "Missing SARAH_ASSISTANT_ID"
+      });
+    }
+
+    const callerPhone = String(
+      body?.message?.call
+        ?.customer?.number ||
+      body?.message?.customer
+        ?.number ||
+      ""
+    ).trim();
+
+    let memory = {
+      success: true,
+      found: false,
+      recent_addresses: []
+    };
+
+    if (
+      isLikelyE164(callerPhone)
+    ) {
+      const controller =
+        new AbortController();
+
+      const timeout =
+        setTimeout(
+          () =>
+            controller.abort(),
+          1500
+        );
+
+      try {
+        const memoryResponse =
+          await fetch(
+            "https://taxi-bridge.onrender.com/customer-memory",
+            {
+              method: "POST",
+
+              headers: {
+                "content-type":
+                  "application/json",
+
+                "x-probe-secret":
+                  PROBE_SECRET
+              },
+
+              body:
+                JSON.stringify({
+                  caller_phone:
+                    callerPhone
+                }),
+
+              signal:
+                controller.signal
+            }
+          );
+
+        if (memoryResponse.ok) {
+          const memoryResult =
+            await memoryResponse.json();
+
+          memory = {
+            success:
+              memoryResult
+                ?.success === true,
+
+            found:
+              memoryResult
+                ?.found === true,
+
+            recent_addresses:
+              Array.isArray(
+                memoryResult
+                  ?.recent_addresses
+              )
+                ? memoryResult
+                    .recent_addresses
+                    .slice(0, 8)
+                : []
+          };
+        }
+      } catch (error) {
+        console.warn(
+          "[ASSISTANT REQUEST] memory preload unavailable",
+          {
+            message:
+              error?.name ===
+              "AbortError"
+                ? "timeout"
+                : String(
+                    error?.message ||
+                    error
+                  )
+          }
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    return res.status(200).json({
+      assistantId,
+
+      assistantOverrides: {
+        variableValues: {
+          preloaded_memory_found:
+            String(
+              memory.found === true
+            ),
+
+          preloaded_recent_addresses_json:
+            JSON.stringify(
+              memory
+                .recent_addresses ||
+              []
+            )
+        }
+      }
+    });
+  }
+);
+/**
+ * =========================
  * START SERVER
  * =========================
  */
